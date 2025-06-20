@@ -3,6 +3,7 @@ package sw_bls12381
 import (
 	"fmt"
 	"math/big"
+	"slices"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/hash_to_curve"
@@ -10,6 +11,7 @@ import (
 	"github.com/consensys/gnark/std/algebra/algopts"
 	"github.com/consensys/gnark/std/algebra/emulated/fields_bls12381"
 	"github.com/consensys/gnark/std/math/emulated"
+	"github.com/consensys/gnark/std/math/emulated/emparams"
 )
 
 type G2 struct {
@@ -134,6 +136,56 @@ func NewG2AffineFixedPlaceholder() G2Affine {
 	return G2Affine{
 		Lines: &lines,
 	}
+}
+
+func (g2 *G2) MarshalG2(p G2Affine, opts ...algopts.AlgebraOption) []frontend.Variable {
+	cfg, err := algopts.NewConfig(opts...)
+	if err != nil {
+		panic(fmt.Sprintf("parse opts: %v", err))
+	}
+	ba, err := emulated.NewField[emparams.BLS12381Fp](g2.api)
+	if err != nil {
+		panic(fmt.Sprintf("new base api: %v", err))
+	}
+	var fp emparams.BLS12377Fp
+	nbBits := 8 * ((fp.Modulus().BitLen() + 7) / 8)
+	var xa1, xa0, ya1, ya0 *emulated.Element[emparams.BLS12381Fp]
+	if cfg.ToBitsCanonical {
+		xa1 = ba.ReduceStrict(&p.P.X.A1)
+		xa0 = ba.ReduceStrict(&p.P.X.A0)
+		ya1 = ba.ReduceStrict(&p.P.Y.A1)
+		ya0 = ba.ReduceStrict(&p.P.Y.A0)
+	} else {
+		xa1 = ba.Reduce(&p.P.X.A1)
+		xa0 = ba.Reduce(&p.P.X.A0)
+		ya1 = ba.Reduce(&p.P.Y.A1)
+		ya0 = ba.Reduce(&p.P.Y.A0)
+	}
+	bxa1 := ba.ToBits(xa1)[:nbBits]
+	bxa0 := ba.ToBits(xa0)[:nbBits]
+	bya1 := ba.ToBits(ya1)[:nbBits]
+	bya0 := ba.ToBits(ya0)[:nbBits]
+	slices.Reverse(bxa1)
+	slices.Reverse(bxa0)
+	slices.Reverse(bya1)
+	slices.Reverse(bya0)
+	res := make([]frontend.Variable, 4*nbBits)
+	copy(res, bxa1)
+	copy(res[len(bxa1):], bxa0)
+	copy(res[len(bxa1)+len(bxa0):], bya1)
+	copy(res[len(bxa1)+len(bxa0)+len(bya1):], bya0)
+	xa1Z := ba.IsZero(xa1)
+	xa0Z := ba.IsZero(xa0)
+	ya1Z := ba.IsZero(ya1)
+	ya0Z := ba.IsZero(ya0)
+	isZero := g2.api.Mul(xa1Z, xa0Z, ya1Z, ya0Z)
+	unusedBits := 64 - (fp.Modulus().BitLen() % 64)
+	if unusedBits >= 3 {
+		res[1] = g2.api.Mul(isZero, 1)
+	} else {
+		res[1] = g2.api.Mul(isZero, 0)
+	}
+	return res
 }
 
 func (g2 *G2) psi(q *G2Affine) *G2Affine {
