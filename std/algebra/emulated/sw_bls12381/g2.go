@@ -335,6 +335,10 @@ func (g2 G2) add(p, q *G2Affine) *G2Affine {
 	}
 }
 
+func (g2 G2) Neg(p *G2Affine) *G2Affine {
+	return g2.neg(p)
+}
+
 func (g2 G2) neg(p *G2Affine) *G2Affine {
 	xr := &p.P.X
 	yr := g2.Ext2.Neg(&p.P.Y)
