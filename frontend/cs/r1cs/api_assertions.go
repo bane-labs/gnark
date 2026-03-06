@@ -52,7 +52,7 @@ func (builder *builder[E]) AssertIsBoolean(i1 frontend.Variable) {
 	v := builder.toVariable(i1)
 
 	if b, ok := builder.constantValue(v); ok {
-		if !(b.IsZero() || builder.isCstOne(b)) {
+		if !(b.IsZero() || builder.isCstOne(b)) { // nolint QF1001
 			panic("assertIsBoolean failed: constant is not 0 or 1") // TODO @gbotrel print
 		}
 		return
@@ -88,7 +88,7 @@ func (builder *builder[E]) AssertIsCrumb(i1 frontend.Variable) {
 // bound can be a constant or a Variable
 //
 // derived from:
-// https://github.com/zcash/zips/blob/main/protocol/protocol.pdf
+// https://zips.z.cash/protocol/protocol.pdf
 func (builder *builder[E]) AssertIsLessOrEqual(v frontend.Variable, bound frontend.Variable) {
 	cv, vConst := builder.constantValue(v)
 	cb, bConst := builder.constantValue(bound)
