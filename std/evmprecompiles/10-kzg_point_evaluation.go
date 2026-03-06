@@ -153,11 +153,11 @@ func KzgPointEvaluation(
 	if err != nil {
 		return fmt.Errorf("new g1: %w", err)
 	}
-	commitmentUncompressed, err := g1.UnmarshalCompressed(comSerializedBytes[:])
+	commitmentUncompressed, err := g1.FromCompressedBytes(comSerializedBytes[:])
 	if err != nil {
 		return fmt.Errorf("unmarshal compressed commitment: %w", err)
 	}
-	proofUncompressed, err := g1.UnmarshalCompressed(proofSerialisedBytes[:])
+	proofUncompressed, err := g1.FromCompressedBytes(proofSerialisedBytes[:])
 	if err != nil {
 		return fmt.Errorf("unmarshal compressed proof: %w", err)
 	}
