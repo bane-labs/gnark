@@ -12,9 +12,6 @@ import (
     "github.com/rs/zerolog"
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/field/pool"
-	"github.com/consensys/gnark/constraint/solver/gkrgates"
-	gkr "github.com/consensys/gnark/internal/gkr/{{ toLower .Curve }}"
-	"github.com/consensys/gnark/internal/gkr/gkrtypes"
 	{{ template "import_fr" . }}
 )
 
@@ -40,20 +37,6 @@ type solver struct {
 }
 
 func newSolver(cs *system, witness fr.Vector, opts ...csolver.Option) (*solver, error) {
-    {{ if not .NoGKR -}}
-    // add GKR options to overwrite the placeholder
-	if cs.GkrInfo.Is() {
-		var gkrData gkr.SolvingData
-		solvingInfo, err := gkrtypes.StoringToSolvingInfo(cs.GkrInfo, gkrgates.Get)
-		if err != nil {
-			return nil, err
-		}
-		opts = append(opts,
-			csolver.OverrideHint(cs.GkrInfo.SolveHintID, gkr.SolveHint(solvingInfo, &gkrData)),
-			csolver.OverrideHint(cs.GkrInfo.ProveHintID, gkr.ProveHint(cs.GkrInfo.HashName, &gkrData)))
-	}
-	{{ end -}}
-
 	// parse options
 	opt, err := csolver.NewConfig(opts...)
 	if err != nil {
@@ -363,6 +346,11 @@ func (s *solver) IsSolved(vID uint32) bool {
 	return s.solved[vID]
 }
 
+// GetBlueprint returns the blueprint with the given ID.
+func (s *solver) GetBlueprint(id constraint.BlueprintID) constraint.Blueprint {
+	return s.Blueprints[id]
+}
+
 // Read interprets input calldata as either a LinearExpression (if R1CS) or a Term (if Plonkish),
 // evaluates it and return the result and the number of uint32 word read.
 func (s *solver) Read(calldata []uint32) (constraint.{{ .ElementType }}, int) {
@@ -426,7 +414,7 @@ func (s *solver) processInstruction(pi constraint.PackedInstruction, scratch *sc
 }
 
 
-// run runs the solver. it return an error if a constraint is not satisfied or if not all wires
+// run runs the solver. it returns an error if a constraint is not satisfied or if not all wires
 // were instantiated.
 func (s *solver) run() error {
 	// minWorkPerCPU is the minimum target number of constraint a task should hold
@@ -650,6 +638,10 @@ func (r *UnsatisfiedConstraintError) Error() string {
 	return fmt.Sprintf("constraint #%d is not satisfied: %s", r.CID, r.Err.Error())
 }
 
+func (r *UnsatisfiedConstraintError) Unwrap() error {
+	return r.Err
+}
+
 
 func (s *solver) wrapErrWithDebugInfo(cID uint32, err error) *UnsatisfiedConstraintError {
 	var debugInfo *string
@@ -665,4 +657,3 @@ type scratch struct {
 	tR1C constraint.R1C
 	tHint constraint.HintMapping
 }
-

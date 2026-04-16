@@ -1,10 +1,10 @@
 package eddsa
 
 import (
-	"errors"
+	"fmt"
 
-	"github.com/consensys/gnark/logger"
 	"github.com/consensys/gnark/std/hash"
+	"github.com/consensys/gnark/std/math/cmp"
 
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/algebra/native/twistededwards"
@@ -13,10 +13,7 @@ import (
 
 	edwardsbls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377/twistededwards"
 	edwardsbls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381/twistededwards"
-	edwardsbls24315 "github.com/consensys/gnark-crypto/ecc/bls24-315/twistededwards"
-	edwardsbls24317 "github.com/consensys/gnark-crypto/ecc/bls24-317/twistededwards"
 	edwardsbn254 "github.com/consensys/gnark-crypto/ecc/bn254/twistededwards"
-	edwardsbw6633 "github.com/consensys/gnark-crypto/ecc/bw6-633/twistededwards"
 	edwardsbw6761 "github.com/consensys/gnark-crypto/ecc/bw6-761/twistededwards"
 )
 
@@ -39,7 +36,17 @@ type Signature struct {
 // Verify verifies an eddsa signature using MiMC hash function
 // cf https://en.wikipedia.org/wiki/EdDSA
 func Verify(curve twistededwards.Curve, sig Signature, msg frontend.Variable, pubKey PublicKey, hash hash.FieldHasher) error {
+	res, err := IsValid(curve, sig, msg, pubKey, hash)
+	if err != nil {
+		return err
+	}
+	curve.API().AssertIsEqual(res, 1)
+	return nil
+}
 
+// IsValid checks if the signature is valid for the given message and public
+// key. It returns 1 if the signature is valid and 0 otherwise.
+func IsValid(curve twistededwards.Curve, sig Signature, msg frontend.Variable, pubKey PublicKey, hash hash.FieldHasher) (frontend.Variable, error) {
 	// compute H(R, A, M)
 	hash.Write(sig.R.X)
 	hash.Write(sig.R.Y)
@@ -54,7 +61,8 @@ func Verify(curve twistededwards.Curve, sig Signature, msg frontend.Variable, pu
 	}
 
 	// Assert S < GroupSize (see https://datatracker.ietf.org/doc/html/rfc8032#section-3.4)
-	curve.API().AssertIsLessOrEqual(sig.S, curve.Params().Order)
+	isLess := cmp.IsLess(curve.API(), sig.S, curve.Params().Order)
+	curve.API().AssertIsEqual(isLess, 1)
 
 	//[S]G-[H(R,A,M)]*A
 	_A := curve.Neg(pubKey.A)
@@ -65,11 +73,8 @@ func Verify(curve twistededwards.Curve, sig Signature, msg frontend.Variable, pu
 	Q = curve.Add(curve.Neg(Q), sig.R)
 
 	// [cofactor]*(lhs-rhs)
-	log := logger.Logger()
 	if !curve.Params().Cofactor.IsUint64() {
-		err := errors.New("invalid cofactor")
-		log.Err(err).Str("cofactor", curve.Params().Cofactor.String()).Send()
-		return err
+		return 0, fmt.Errorf("invalid cofactor: %s", curve.Params().Cofactor.String())
 	}
 	cofactor := curve.Params().Cofactor.Uint64()
 	switch cofactor {
@@ -78,13 +83,13 @@ func Verify(curve twistededwards.Curve, sig Signature, msg frontend.Variable, pu
 	case 8:
 		Q = curve.Double(curve.Double(curve.Double(Q)))
 	default:
-		log.Warn().Str("cofactor", curve.Params().Cofactor.String()).Msg("curve cofactor is not implemented")
+		return 0, fmt.Errorf("cofactor %d not implemented", cofactor)
 	}
 
-	curve.API().AssertIsEqual(Q.X, 0)
-	curve.API().AssertIsEqual(Q.Y, 1)
-
-	return nil
+	return curve.API().And(
+		curve.API().IsZero(Q.X),
+		curve.API().IsZero(curve.API().Sub(Q.Y, 1)),
+	), nil
 }
 
 // Assign is a helper to assigned a compressed binary public key representation into its uncompressed form
@@ -115,9 +120,6 @@ func parseSignature(curveID tedwards.ID, buf []byte) ([]byte, []byte, []byte, er
 	var pointbls12381 edwardsbls12381.PointAffine
 	var pointbls12377 edwardsbls12377.PointAffine
 	var pointbw6761 edwardsbw6761.PointAffine
-	var pointbls24315 edwardsbls24315.PointAffine
-	var pointbls24317 edwardsbls24317.PointAffine
-	var pointbw6633 edwardsbw6633.PointAffine
 
 	switch curveID {
 	case tedwards.BN254:
@@ -160,36 +162,6 @@ func parseSignature(curveID tedwards.ID, buf []byte) ([]byte, []byte, []byte, er
 		}
 		s := buf[48:]
 		return a, b, s, nil
-	case tedwards.BLS24_317:
-		if _, err := pointbls24317.SetBytes(buf[:32]); err != nil {
-			return nil, nil, nil, err
-		}
-		a, b, err := parsePoint(curveID, buf)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		s := buf[32:]
-		return a, b, s, nil
-	case tedwards.BLS24_315:
-		if _, err := pointbls24315.SetBytes(buf[:32]); err != nil {
-			return nil, nil, nil, err
-		}
-		a, b, err := parsePoint(curveID, buf)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		s := buf[32:]
-		return a, b, s, nil
-	case tedwards.BW6_633:
-		if _, err := pointbw6633.SetBytes(buf[:40]); err != nil {
-			return nil, nil, nil, err
-		}
-		a, b, err := parsePoint(curveID, buf)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		s := buf[40:]
-		return a, b, s, nil
 	default:
 		panic("not implemented")
 	}
@@ -201,9 +173,6 @@ func parsePoint(curveID tedwards.ID, buf []byte) ([]byte, []byte, error) {
 	var pointbls12381 edwardsbls12381.PointAffine
 	var pointbls12377 edwardsbls12377.PointAffine
 	var pointbw6761 edwardsbw6761.PointAffine
-	var pointbls24315 edwardsbls24315.PointAffine
-	var pointbls24317 edwardsbls24317.PointAffine
-	var pointbw6633 edwardsbw6633.PointAffine
 	switch curveID {
 	case tedwards.BN254:
 		if _, err := pointbn254.SetBytes(buf[:32]); err != nil {
@@ -232,27 +201,6 @@ func parsePoint(curveID tedwards.ID, buf []byte) ([]byte, []byte, error) {
 		}
 		a := pointbw6761.X.Bytes()
 		b := pointbw6761.Y.Bytes()
-		return a[:], b[:], nil
-	case tedwards.BLS24_317:
-		if _, err := pointbls24317.SetBytes(buf[:32]); err != nil {
-			return nil, nil, err
-		}
-		a := pointbls24317.X.Bytes()
-		b := pointbls24317.Y.Bytes()
-		return a[:], b[:], nil
-	case tedwards.BLS24_315:
-		if _, err := pointbls24315.SetBytes(buf[:32]); err != nil {
-			return nil, nil, err
-		}
-		a := pointbls24315.X.Bytes()
-		b := pointbls24315.Y.Bytes()
-		return a[:], b[:], nil
-	case tedwards.BW6_633:
-		if _, err := pointbw6633.SetBytes(buf[:40]); err != nil {
-			return nil, nil, err
-		}
-		a := pointbw6633.X.Bytes()
-		b := pointbw6633.Y.Bytes()
 		return a[:], b[:], nil
 	default:
 		panic("not implemented")

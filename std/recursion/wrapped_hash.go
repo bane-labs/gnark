@@ -6,6 +6,8 @@ import (
 	"hash"
 	"math/big"
 
+	"slices"
+
 	"github.com/consensys/gnark-crypto/ecc"
 	cryptomimc "github.com/consensys/gnark-crypto/hash"
 	"github.com/consensys/gnark/frontend"
@@ -13,7 +15,6 @@ import (
 	stdhash "github.com/consensys/gnark/std/hash"
 	"github.com/consensys/gnark/std/hash/mimc"
 	"github.com/consensys/gnark/std/math/bits"
-	"golang.org/x/exp/slices"
 )
 
 type shortNativeHash struct {
@@ -49,15 +50,6 @@ func NewShort(current, target *big.Int) (hash.Hash, error) {
 	case ecc.BW6_761.ScalarField().String():
 		h = cryptomimc.MIMC_BW6_761
 		bitBlockSize = ecc.BW6_761.ScalarField().BitLen()
-	case ecc.BLS24_315.ScalarField().String():
-		h = cryptomimc.MIMC_BLS24_315
-		bitBlockSize = ecc.BLS24_315.ScalarField().BitLen()
-	case ecc.BLS24_317.ScalarField().String():
-		h = cryptomimc.MIMC_BLS24_317
-		bitBlockSize = ecc.BLS24_317.ScalarField().BitLen()
-	case ecc.BW6_633.ScalarField().String():
-		h = cryptomimc.MIMC_BW6_633
-		bitBlockSize = ecc.BW6_633.ScalarField().BitLen()
 	default:
 		return nil, fmt.Errorf("no default mimc for scalar field: %s", current.String())
 	}

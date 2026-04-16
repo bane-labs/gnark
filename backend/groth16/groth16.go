@@ -19,29 +19,19 @@ import (
 	"github.com/consensys/gnark/constraint"
 	cs_bls12377 "github.com/consensys/gnark/constraint/bls12-377"
 	cs_bls12381 "github.com/consensys/gnark/constraint/bls12-381"
-	cs_bls24315 "github.com/consensys/gnark/constraint/bls24-315"
-	cs_bls24317 "github.com/consensys/gnark/constraint/bls24-317"
 	cs_bn254 "github.com/consensys/gnark/constraint/bn254"
-	cs_bw6633 "github.com/consensys/gnark/constraint/bw6-633"
 	cs_bw6761 "github.com/consensys/gnark/constraint/bw6-761"
 
 	fr_bls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
 	fr_bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
-	fr_bls24315 "github.com/consensys/gnark-crypto/ecc/bls24-315/fr"
-	fr_bls24317 "github.com/consensys/gnark-crypto/ecc/bls24-317/fr"
 	fr_bn254 "github.com/consensys/gnark-crypto/ecc/bn254/fr"
-	fr_bw6633 "github.com/consensys/gnark-crypto/ecc/bw6-633/fr"
 	fr_bw6761 "github.com/consensys/gnark-crypto/ecc/bw6-761/fr"
 
 	gnarkio "github.com/consensys/gnark/io"
 
 	groth16_bls12377 "github.com/consensys/gnark/backend/groth16/bls12-377"
 	groth16_bls12381 "github.com/consensys/gnark/backend/groth16/bls12-381"
-	groth16_bls24315 "github.com/consensys/gnark/backend/groth16/bls24-315"
-	groth16_bls24317 "github.com/consensys/gnark/backend/groth16/bls24-317"
 	groth16_bn254 "github.com/consensys/gnark/backend/groth16/bn254"
-	icicle_bn254 "github.com/consensys/gnark/backend/groth16/bn254/icicle"
-	groth16_bw6633 "github.com/consensys/gnark/backend/groth16/bw6-633"
 	groth16_bw6761 "github.com/consensys/gnark/backend/groth16/bw6-761"
 )
 
@@ -149,24 +139,6 @@ func Verify(proof Proof, vk VerifyingKey, publicWitness witness.Witness, opts ..
 			return witness.ErrInvalidWitness
 		}
 		return groth16_bw6761.Verify(_proof, vk.(*groth16_bw6761.VerifyingKey), w, opts...)
-	case *groth16_bls24317.Proof:
-		w, ok := publicWitness.Vector().(fr_bls24317.Vector)
-		if !ok {
-			return witness.ErrInvalidWitness
-		}
-		return groth16_bls24317.Verify(_proof, vk.(*groth16_bls24317.VerifyingKey), w, opts...)
-	case *groth16_bls24315.Proof:
-		w, ok := publicWitness.Vector().(fr_bls24315.Vector)
-		if !ok {
-			return witness.ErrInvalidWitness
-		}
-		return groth16_bls24315.Verify(_proof, vk.(*groth16_bls24315.VerifyingKey), w, opts...)
-	case *groth16_bw6633.Proof:
-		w, ok := publicWitness.Vector().(fr_bw6633.Vector)
-		if !ok {
-			return witness.ErrInvalidWitness
-		}
-		return groth16_bw6633.Verify(_proof, vk.(*groth16_bw6633.VerifyingKey), w, opts...)
 	default:
 		panic("unrecognized R1CS curve type")
 	}
@@ -236,22 +208,10 @@ func Prove(r1cs constraint.ConstraintSystem, pk ProvingKey, fullWitness witness.
 		return groth16_bls12381.Prove(_r1cs, pk.(*groth16_bls12381.ProvingKey), fullWitness, opts...)
 
 	case *cs_bn254.R1CS:
-		if icicle_bn254.HasIcicle {
-			return icicle_bn254.Prove(_r1cs, pk.(*icicle_bn254.ProvingKey), fullWitness, opts...)
-		}
 		return groth16_bn254.Prove(_r1cs, pk.(*groth16_bn254.ProvingKey), fullWitness, opts...)
 
 	case *cs_bw6761.R1CS:
 		return groth16_bw6761.Prove(_r1cs, pk.(*groth16_bw6761.ProvingKey), fullWitness, opts...)
-
-	case *cs_bls24317.R1CS:
-		return groth16_bls24317.Prove(_r1cs, pk.(*groth16_bls24317.ProvingKey), fullWitness, opts...)
-
-	case *cs_bls24315.R1CS:
-		return groth16_bls24315.Prove(_r1cs, pk.(*groth16_bls24315.ProvingKey), fullWitness, opts...)
-
-	case *cs_bw6633.R1CS:
-		return groth16_bw6633.Prove(_r1cs, pk.(*groth16_bw6633.ProvingKey), fullWitness, opts...)
 
 	default:
 		panic("unrecognized R1CS curve type")
@@ -284,15 +244,8 @@ func Setup(r1cs constraint.ConstraintSystem) (ProvingKey, VerifyingKey, error) {
 		}
 		return &pk, &vk, nil
 	case *cs_bn254.R1CS:
-		var vk groth16_bn254.VerifyingKey
-		if icicle_bn254.HasIcicle {
-			var pk icicle_bn254.ProvingKey
-			if err := icicle_bn254.Setup(_r1cs, &pk, &vk); err != nil {
-				return nil, nil, err
-			}
-			return &pk, &vk, nil
-		}
 		var pk groth16_bn254.ProvingKey
+		var vk groth16_bn254.VerifyingKey
 		if err := groth16_bn254.Setup(_r1cs, &pk, &vk); err != nil {
 			return nil, nil, err
 		}
@@ -301,27 +254,6 @@ func Setup(r1cs constraint.ConstraintSystem) (ProvingKey, VerifyingKey, error) {
 		var pk groth16_bw6761.ProvingKey
 		var vk groth16_bw6761.VerifyingKey
 		if err := groth16_bw6761.Setup(_r1cs, &pk, &vk); err != nil {
-			return nil, nil, err
-		}
-		return &pk, &vk, nil
-	case *cs_bls24317.R1CS:
-		var pk groth16_bls24317.ProvingKey
-		var vk groth16_bls24317.VerifyingKey
-		if err := groth16_bls24317.Setup(_r1cs, &pk, &vk); err != nil {
-			return nil, nil, err
-		}
-		return &pk, &vk, nil
-	case *cs_bls24315.R1CS:
-		var pk groth16_bls24315.ProvingKey
-		var vk groth16_bls24315.VerifyingKey
-		if err := groth16_bls24315.Setup(_r1cs, &pk, &vk); err != nil {
-			return nil, nil, err
-		}
-		return &pk, &vk, nil
-	case *cs_bw6633.R1CS:
-		var pk groth16_bw6633.ProvingKey
-		var vk groth16_bw6633.VerifyingKey
-		if err := groth16_bw6633.Setup(_r1cs, &pk, &vk); err != nil {
 			return nil, nil, err
 		}
 		return &pk, &vk, nil
@@ -347,13 +279,6 @@ func DummySetup(r1cs constraint.ConstraintSystem) (ProvingKey, error) {
 		}
 		return &pk, nil
 	case *cs_bn254.R1CS:
-		if icicle_bn254.HasIcicle {
-			var pk icicle_bn254.ProvingKey
-			if err := icicle_bn254.DummySetup(_r1cs, &pk); err != nil {
-				return nil, err
-			}
-			return &pk, nil
-		}
 		var pk groth16_bn254.ProvingKey
 		if err := groth16_bn254.DummySetup(_r1cs, &pk); err != nil {
 			return nil, err
@@ -362,24 +287,6 @@ func DummySetup(r1cs constraint.ConstraintSystem) (ProvingKey, error) {
 	case *cs_bw6761.R1CS:
 		var pk groth16_bw6761.ProvingKey
 		if err := groth16_bw6761.DummySetup(_r1cs, &pk); err != nil {
-			return nil, err
-		}
-		return &pk, nil
-	case *cs_bls24317.R1CS:
-		var pk groth16_bls24317.ProvingKey
-		if err := groth16_bls24317.DummySetup(_r1cs, &pk); err != nil {
-			return nil, err
-		}
-		return &pk, nil
-	case *cs_bls24315.R1CS:
-		var pk groth16_bls24315.ProvingKey
-		if err := groth16_bls24315.DummySetup(_r1cs, &pk); err != nil {
-			return nil, err
-		}
-		return &pk, nil
-	case *cs_bw6633.R1CS:
-		var pk groth16_bw6633.ProvingKey
-		if err := groth16_bw6633.DummySetup(_r1cs, &pk); err != nil {
 			return nil, err
 		}
 		return &pk, nil
@@ -395,21 +302,12 @@ func NewProvingKey(curveID ecc.ID) ProvingKey {
 	switch curveID {
 	case ecc.BN254:
 		pk = &groth16_bn254.ProvingKey{}
-		if icicle_bn254.HasIcicle {
-			pk = icicle_bn254.NewProvingKey()
-		}
 	case ecc.BLS12_377:
 		pk = &groth16_bls12377.ProvingKey{}
 	case ecc.BLS12_381:
 		pk = &groth16_bls12381.ProvingKey{}
 	case ecc.BW6_761:
 		pk = &groth16_bw6761.ProvingKey{}
-	case ecc.BLS24_317:
-		pk = &groth16_bls24317.ProvingKey{}
-	case ecc.BLS24_315:
-		pk = &groth16_bls24315.ProvingKey{}
-	case ecc.BW6_633:
-		pk = &groth16_bw6633.ProvingKey{}
 	default:
 		panic("not implemented")
 	}
@@ -429,12 +327,6 @@ func NewVerifyingKey(curveID ecc.ID) VerifyingKey {
 		vk = &groth16_bls12381.VerifyingKey{}
 	case ecc.BW6_761:
 		vk = &groth16_bw6761.VerifyingKey{}
-	case ecc.BLS24_317:
-		vk = &groth16_bls24317.VerifyingKey{}
-	case ecc.BLS24_315:
-		vk = &groth16_bls24315.VerifyingKey{}
-	case ecc.BW6_633:
-		vk = &groth16_bw6633.VerifyingKey{}
 	default:
 		panic("not implemented")
 	}
@@ -455,12 +347,6 @@ func NewProof(curveID ecc.ID) Proof {
 		proof = &groth16_bls12381.Proof{}
 	case ecc.BW6_761:
 		proof = &groth16_bw6761.Proof{}
-	case ecc.BLS24_317:
-		proof = &groth16_bls24317.Proof{}
-	case ecc.BLS24_315:
-		proof = &groth16_bls24315.Proof{}
-	case ecc.BW6_633:
-		proof = &groth16_bw6633.Proof{}
 	default:
 		panic("not implemented")
 	}
@@ -481,12 +367,6 @@ func NewCS(curveID ecc.ID) constraint.ConstraintSystem {
 		r1cs = &cs_bls12381.R1CS{}
 	case ecc.BW6_761:
 		r1cs = &cs_bw6761.R1CS{}
-	case ecc.BLS24_317:
-		r1cs = &cs_bls24317.R1CS{}
-	case ecc.BLS24_315:
-		r1cs = &cs_bls24315.R1CS{}
-	case ecc.BW6_633:
-		r1cs = &cs_bw6633.R1CS{}
 	default:
 		panic("not implemented")
 	}

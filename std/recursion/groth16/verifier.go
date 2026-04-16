@@ -7,8 +7,6 @@ import (
 	fr_bls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	fr_bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
-	bls24315 "github.com/consensys/gnark-crypto/ecc/bls24-315"
-	fr_bls24315 "github.com/consensys/gnark-crypto/ecc/bls24-315/fr"
 	"github.com/consensys/gnark-crypto/ecc/bn254"
 	fr_bn254 "github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	bw6761 "github.com/consensys/gnark-crypto/ecc/bw6-761"
@@ -16,7 +14,6 @@ import (
 	"github.com/consensys/gnark/backend/groth16"
 	groth16backend_bls12377 "github.com/consensys/gnark/backend/groth16/bls12-377"
 	groth16backend_bls12381 "github.com/consensys/gnark/backend/groth16/bls12-381"
-	groth16backend_bls24315 "github.com/consensys/gnark/backend/groth16/bls24-315"
 	groth16backend_bn254 "github.com/consensys/gnark/backend/groth16/bn254"
 	groth16backend_bw6761 "github.com/consensys/gnark/backend/groth16/bw6-761"
 	"github.com/consensys/gnark/backend/witness"
@@ -27,7 +24,6 @@ import (
 	"github.com/consensys/gnark/std/algebra/emulated/sw_bn254"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_bw6761"
 	"github.com/consensys/gnark/std/algebra/native/sw_bls12377"
-	"github.com/consensys/gnark/std/algebra/native/sw_bls24315"
 	"github.com/consensys/gnark/std/commitments/pedersen"
 	"github.com/consensys/gnark/std/math/emulated"
 	"github.com/consensys/gnark/std/recursion"
@@ -107,29 +103,10 @@ func ValueOfProof[G1El algebra.G1ElementT, G2El algebra.G2ElementT](proof groth1
 		if err != nil {
 			return ret, fmt.Errorf("commitment pok: %w", err)
 		}
-	case *Proof[sw_bls24315.G1Affine, sw_bls24315.G2Affine]:
-		tProof, ok := proof.(*groth16backend_bls24315.Proof)
-		if !ok {
-			return ret, fmt.Errorf("expected bls24315.Proof, got %T", proof)
-		}
-		ar.Ar = sw_bls24315.NewG1Affine(tProof.Ar)
-		ar.Krs = sw_bls24315.NewG1Affine(tProof.Krs)
-		ar.Bs = sw_bls24315.NewG2Affine(tProof.Bs)
-		ar.Commitments = make([]pedersen.Commitment[sw_bls24315.G1Affine], len(tProof.Commitments))
-		for i := range tProof.Commitments {
-			ar.Commitments[i], err = pedersen.ValueOfCommitment[sw_bls24315.G1Affine](tProof.Commitments[i])
-			if err != nil {
-				return ret, fmt.Errorf("commitment[%d]: %w", i, err)
-			}
-		}
-		ar.CommitmentPok, err = pedersen.ValueOfKnowledgeProof[sw_bls24315.G1Affine](tProof.CommitmentPok)
-		if err != nil {
-			return ret, fmt.Errorf("commitment pok: %w", err)
-		}
 	case *Proof[sw_bw6761.G1Affine, sw_bw6761.G2Affine]:
 		tProof, ok := proof.(*groth16backend_bw6761.Proof)
 		if !ok {
-			return ret, fmt.Errorf("expected bls24315.Proof, got %T", proof)
+			return ret, fmt.Errorf("expected bw6761.Proof, got %T", proof)
 		}
 		ar.Ar = sw_bw6761.NewG1Affine(tProof.Ar)
 		ar.Krs = sw_bw6761.NewG1Affine(tProof.Krs)
@@ -222,7 +199,7 @@ func ValueOfVerifyingKey[G1El algebra.G1ElementT, G2El algebra.G2ElementT, GtEl 
 	case *VerifyingKey[sw_bls12377.G1Affine, sw_bls12377.G2Affine, sw_bls12377.GT]:
 		tVk, ok := vk.(*groth16backend_bls12377.VerifyingKey)
 		if !ok {
-			return ret, fmt.Errorf("expected bn254.VerifyingKey, got %T", vk)
+			return ret, fmt.Errorf("expected bls12377.VerifyingKey, got %T", vk)
 		}
 		// compute E
 		e, err := bls12377.Pair([]bls12377.G1Affine{tVk.G1.Alpha}, []bls12377.G2Affine{tVk.G2.Beta})
@@ -270,34 +247,6 @@ func ValueOfVerifyingKey[G1El algebra.G1ElementT, G2El algebra.G2ElementT, GtEl 
 		s.CommitmentKeys = make([]pedersen.VerifyingKey[sw_bls12381.G2Affine], len(tVk.CommitmentKeys))
 		for i := range tVk.CommitmentKeys {
 			s.CommitmentKeys[i], err = pedersen.ValueOfVerifyingKey[sw_bls12381.G2Affine](&tVk.CommitmentKeys[i])
-			if err != nil {
-				return ret, fmt.Errorf("commitment key[%d]: %w", i, err)
-			}
-		}
-		ret.PublicAndCommitmentCommitted = tVk.PublicAndCommitmentCommitted
-	case *VerifyingKey[sw_bls24315.G1Affine, sw_bls24315.G2Affine, sw_bls24315.GT]:
-		tVk, ok := vk.(*groth16backend_bls24315.VerifyingKey)
-		if !ok {
-			return ret, fmt.Errorf("expected bls12381.VerifyingKey, got %T", vk)
-		}
-		// compute E
-		e, err := bls24315.Pair([]bls24315.G1Affine{tVk.G1.Alpha}, []bls24315.G2Affine{tVk.G2.Beta})
-		if err != nil {
-			return ret, fmt.Errorf("precompute pairing: %w", err)
-		}
-		s.E = sw_bls24315.NewGTEl(e)
-		s.G1.K = make([]sw_bls24315.G1Affine, len(tVk.G1.K))
-		for i := range s.G1.K {
-			s.G1.K[i] = sw_bls24315.NewG1Affine(tVk.G1.K[i])
-		}
-		var deltaNeg, gammaNeg bls24315.G2Affine
-		deltaNeg.Neg(&tVk.G2.Delta)
-		gammaNeg.Neg(&tVk.G2.Gamma)
-		s.G2.DeltaNeg = sw_bls24315.NewG2Affine(deltaNeg)
-		s.G2.GammaNeg = sw_bls24315.NewG2Affine(gammaNeg)
-		s.CommitmentKeys = make([]pedersen.VerifyingKey[sw_bls24315.G2Affine], len(tVk.CommitmentKeys))
-		for i := range tVk.CommitmentKeys {
-			s.CommitmentKeys[i], err = pedersen.ValueOfVerifyingKey[sw_bls24315.G2Affine](&tVk.CommitmentKeys[i])
 			if err != nil {
 				return ret, fmt.Errorf("commitment key[%d]: %w", i, err)
 			}
@@ -374,7 +323,7 @@ func ValueOfVerifyingKeyFixed[G1El algebra.G1ElementT, G2El algebra.G2ElementT, 
 	case *VerifyingKey[sw_bls12377.G1Affine, sw_bls12377.G2Affine, sw_bls12377.GT]:
 		tVk, ok := vk.(*groth16backend_bls12377.VerifyingKey)
 		if !ok {
-			return ret, fmt.Errorf("expected bn254.VerifyingKey, got %T", vk)
+			return ret, fmt.Errorf("expected bls12377.VerifyingKey, got %T", vk)
 		}
 		// compute E
 		e, err := bls12377.Pair([]bls12377.G1Affine{tVk.G1.Alpha}, []bls12377.G2Affine{tVk.G2.Beta})
@@ -422,34 +371,6 @@ func ValueOfVerifyingKeyFixed[G1El algebra.G1ElementT, G2El algebra.G2ElementT, 
 		s.CommitmentKeys = make([]pedersen.VerifyingKey[sw_bls12381.G2Affine], len(tVk.CommitmentKeys))
 		for i := range tVk.CommitmentKeys {
 			s.CommitmentKeys[i], err = pedersen.ValueOfVerifyingKeyFixed[sw_bls12381.G2Affine](&tVk.CommitmentKeys[i])
-			if err != nil {
-				return ret, fmt.Errorf("commitment key[%d]: %w", i, err)
-			}
-		}
-		s.PublicAndCommitmentCommitted = tVk.PublicAndCommitmentCommitted
-	case *VerifyingKey[sw_bls24315.G1Affine, sw_bls24315.G2Affine, sw_bls24315.GT]:
-		tVk, ok := vk.(*groth16backend_bls24315.VerifyingKey)
-		if !ok {
-			return ret, fmt.Errorf("expected bls12381.VerifyingKey, got %T", vk)
-		}
-		// compute E
-		e, err := bls24315.Pair([]bls24315.G1Affine{tVk.G1.Alpha}, []bls24315.G2Affine{tVk.G2.Beta})
-		if err != nil {
-			return ret, fmt.Errorf("precompute pairing: %w", err)
-		}
-		s.E = sw_bls24315.NewGTEl(e)
-		s.G1.K = make([]sw_bls24315.G1Affine, len(tVk.G1.K))
-		for i := range s.G1.K {
-			s.G1.K[i] = sw_bls24315.NewG1Affine(tVk.G1.K[i])
-		}
-		var deltaNeg, gammaNeg bls24315.G2Affine
-		deltaNeg.Neg(&tVk.G2.Delta)
-		gammaNeg.Neg(&tVk.G2.Gamma)
-		s.G2.DeltaNeg = sw_bls24315.NewG2AffineFixed(deltaNeg)
-		s.G2.GammaNeg = sw_bls24315.NewG2AffineFixed(gammaNeg)
-		s.CommitmentKeys = make([]pedersen.VerifyingKey[sw_bls24315.G2Affine], len(tVk.CommitmentKeys))
-		for i := range tVk.CommitmentKeys {
-			s.CommitmentKeys[i], err = pedersen.ValueOfVerifyingKeyFixed[sw_bls24315.G2Affine](&tVk.CommitmentKeys[i])
 			if err != nil {
 				return ret, fmt.Errorf("commitment key[%d]: %w", i, err)
 			}
@@ -543,18 +464,10 @@ func ValueOfWitness[FR emulated.FieldParams](w witness.Witness) (Witness[FR], er
 		for i := range vect {
 			s.Public = append(s.Public, sw_bls12381.NewScalar(vect[i]))
 		}
-	case *Witness[sw_bls24315.ScalarField]:
-		vect, ok := vec.(fr_bls24315.Vector)
-		if !ok {
-			return ret, fmt.Errorf("expected fr_bls24315.Vector, got %T", vec)
-		}
-		for i := range vect {
-			s.Public = append(s.Public, sw_bls24315.NewScalar(vect[i]))
-		}
 	case *Witness[sw_bw6761.ScalarField]:
 		vect, ok := vec.(fr_bw6761.Vector)
 		if !ok {
-			return ret, fmt.Errorf("expected fr_bls24315.Vector, got %T", vec)
+			return ret, fmt.Errorf("expected fr_bw6761.Vector, got %T", vec)
 		}
 		for i := range vect {
 			s.Public = append(s.Public, sw_bw6761.NewScalar(vect[i]))
@@ -606,16 +519,26 @@ func NewVerifier[FR emulated.FieldParams, G1El algebra.G1ElementT, G2El algebra.
 // AssertProof asserts that the SNARK proof holds for the given witness and
 // verifying key.
 func (v *Verifier[FR, G1El, G2El, GtEl]) AssertProof(vk VerifyingKey[G1El, G2El, GtEl], proof Proof[G1El, G2El], witness Witness[FR], opts ...VerifierOption) error {
+	isValid, err := v.IsValidProof(vk, proof, witness, opts...)
+	if err != nil {
+		return err
+	}
+	v.api.AssertIsEqual(isValid, 1)
+	return nil
+}
+
+// IsValidProof returns a variable that is 1 if the proof is valid and 0 otherwise.
+func (v *Verifier[FR, G1El, G2El, GtEl]) IsValidProof(vk VerifyingKey[G1El, G2El, GtEl], proof Proof[G1El, G2El], witness Witness[FR], opts ...VerifierOption) (frontend.Variable, error) {
 	if len(vk.CommitmentKeys) != len(proof.Commitments) {
-		return fmt.Errorf("invalid number of commitments, got %d, expected %d", len(proof.Commitments), len(vk.CommitmentKeys))
+		return 0, fmt.Errorf("invalid number of commitments, got %d, expected %d", len(proof.Commitments), len(vk.CommitmentKeys))
 	}
 	if len(vk.CommitmentKeys) != len(vk.PublicAndCommitmentCommitted) {
-		return fmt.Errorf("invalid number of commitment keys, got %d, expected %d", len(vk.CommitmentKeys), len(vk.PublicAndCommitmentCommitted))
+		return 0, fmt.Errorf("invalid number of commitment keys, got %d, expected %d", len(vk.CommitmentKeys), len(vk.PublicAndCommitmentCommitted))
 	}
 	var fr FR
 	nbPublicVars := len(vk.G1.K) - len(vk.PublicAndCommitmentCommitted)
 	if len(witness.Public) != nbPublicVars-1 {
-		return fmt.Errorf("invalid witness size, got %d, expected %d (public - ONE_WIRE)", len(witness.Public), len(vk.G1.K)-1)
+		return 0, fmt.Errorf("invalid witness size, got %d, expected %d (public - ONE_WIRE)", len(witness.Public), len(vk.G1.K)-1)
 	}
 
 	inP := make([]*G1El, len(vk.G1.K)-1) // first is for the one wire, we add it manually after MSM
@@ -629,11 +552,11 @@ func (v *Verifier[FR, G1El, G2El, GtEl]) AssertProof(vk VerifyingKey[G1El, G2El,
 
 	opt, err := newCfg(opts...)
 	if err != nil {
-		return fmt.Errorf("apply options: %w", err)
+		return 0, fmt.Errorf("apply options: %w", err)
 	}
 	hashToField, err := recursion.NewHash(v.api, fr.Modulus(), true)
 	if err != nil {
-		return fmt.Errorf("hash to field: %w", err)
+		return 0, fmt.Errorf("hash to field: %w", err)
 	}
 
 	maxNbPublicCommitted := 0
@@ -662,16 +585,16 @@ func (v *Verifier[FR, G1El, G2El, GtEl]) AssertProof(vk VerifyingKey[G1El, G2El,
 		// explicitly do not verify the commitment as there is nothing
 	case 1:
 		if err = v.commitment.AssertCommitment(proof.Commitments[0], proof.CommitmentPok, vk.CommitmentKeys[0], opt.pedopt...); err != nil {
-			return fmt.Errorf("assert commitment: %w", err)
+			return 0, fmt.Errorf("assert commitment: %w", err)
 		}
 	default:
 		// TODO: we support only a single commitment in the recursion for now
-		return fmt.Errorf("multiple commitments are not supported")
+		return 0, fmt.Errorf("multiple commitments are not supported")
 	}
 
 	kSum, err := v.curve.MultiScalarMul(inP, inS, opt.algopt...)
 	if err != nil {
-		return fmt.Errorf("multi scalar mul: %w", err)
+		return 0, fmt.Errorf("multi scalar mul: %w", err)
 	}
 	kSum = v.curve.Add(kSum, &vk.G1.K[0])
 
@@ -686,10 +609,9 @@ func (v *Verifier[FR, G1El, G2El, GtEl]) AssertProof(vk VerifyingKey[G1El, G2El,
 	}
 	pairing, err := v.pairing.Pair([]*G1El{kSum, &proof.Krs, &proof.Ar}, []*G2El{&vk.G2.GammaNeg, &vk.G2.DeltaNeg, &proof.Bs})
 	if err != nil {
-		return fmt.Errorf("pairing: %w", err)
+		return 0, fmt.Errorf("pairing: %w", err)
 	}
-	v.pairing.AssertIsEqual(pairing, &vk.E)
-	return nil
+	return v.pairing.IsEqual(pairing, &vk.E), nil
 }
 
 // SwitchVerification key switches the verification key based on the provided

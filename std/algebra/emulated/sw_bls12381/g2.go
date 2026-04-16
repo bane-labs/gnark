@@ -517,7 +517,6 @@ func (g2 *G2) AddUnified(p, q *G2Affine) *G2Affine {
 }
 
 func (g2 G2) add(p, q *G2Affine) *G2Affine {
-	mone := g2.fp.NewElement(-1)
 
 	// compute λ = (q.y-p.y)/(q.x-p.x)
 	qypy := g2.Ext2.Sub(&q.P.Y, &p.P.Y)
@@ -525,14 +524,14 @@ func (g2 G2) add(p, q *G2Affine) *G2Affine {
 	λ := g2.Ext2.DivUnchecked(qypy, qxpx)
 
 	// xr = λ²-p.x-q.x
-	xr0 := g2.fp.Eval([][]*baseEl{{&λ.A0, &λ.A0}, {mone, &λ.A1, &λ.A1}, {mone, &p.P.X.A0}, {mone, &q.P.X.A0}}, []int{1, 1, 1, 1})
-	xr1 := g2.fp.Eval([][]*baseEl{{&λ.A0, &λ.A1}, {mone, &p.P.X.A1}, {mone, &q.P.X.A1}}, []int{2, 1, 1})
+	xr0 := g2.fp.Eval([][]*baseEl{{&λ.A0, &λ.A0}, {&λ.A1, &λ.A1}, {&p.P.X.A0}, {&q.P.X.A0}}, []int{1, -1, -1, -1})
+	xr1 := g2.fp.Eval([][]*baseEl{{&λ.A0, &λ.A1}, {&p.P.X.A1}, {&q.P.X.A1}}, []int{2, -1, -1})
 	xr := &fields_bls12381.E2{A0: *xr0, A1: *xr1}
 
 	// p.y = λ(p.x-r.x) - p.y
 	yr := g2.Ext2.Sub(&p.P.X, xr)
-	yr0 := g2.fp.Eval([][]*baseEl{{&λ.A0, &yr.A0}, {mone, &λ.A1, &yr.A1}, {mone, &p.P.Y.A0}}, []int{1, 1, 1})
-	yr1 := g2.fp.Eval([][]*baseEl{{&λ.A0, &yr.A1}, {&λ.A1, &yr.A0}, {mone, &p.P.Y.A1}}, []int{1, 1, 1})
+	yr0 := g2.fp.Eval([][]*baseEl{{&λ.A0, &yr.A0}, {&λ.A1, &yr.A1}, {&p.P.Y.A0}}, []int{1, -1, -1})
+	yr1 := g2.fp.Eval([][]*baseEl{{&λ.A0, &yr.A1}, {&λ.A1, &yr.A0}, {&p.P.Y.A1}}, []int{1, 1, -1})
 	yr = &fields_bls12381.E2{A0: *yr0, A1: *yr1}
 
 	return &G2Affine{
@@ -568,13 +567,26 @@ func (g2 G2) neg(p *G2Affine) *G2Affine {
 	}
 }
 
+// muxE2Y8Signed selects from 8 E2 Y-values using selector (0-7) and conditionally
+// negates based on signBit. This optimizes the common GLV pattern where Y[i] =
+// -Y[15-i], reducing a 16-to-1 Mux to an 8-to-1 Mux plus conditional negation.
+func (g2 *G2) muxE2Y8Signed(signBit frontend.Variable, selector frontend.Variable, yA0, yA1 [8]*emulated.Element[BaseField]) *fields_bls12381.E2 {
+	baseA0 := g2.fp.Mux(selector, yA0[:]...)
+	baseA1 := g2.fp.Mux(selector, yA1[:]...)
+	negA0 := g2.fp.Neg(baseA0)
+	negA1 := g2.fp.Neg(baseA1)
+	return &fields_bls12381.E2{
+		A0: *g2.fp.Select(signBit, negA0, baseA0),
+		A1: *g2.fp.Select(signBit, negA1, baseA1),
+	}
+}
+
 func (g2 G2) sub(p, q *G2Affine) *G2Affine {
 	qNeg := g2.neg(q)
 	return g2.add(p, qNeg)
 }
 
 func (g2 *G2) double(p *G2Affine) *G2Affine {
-	mone := g2.fp.NewElement(-1)
 
 	// compute λ = (3p.x²)/2*p.y
 	xx3a := g2.Square(&p.P.X)
@@ -583,14 +595,14 @@ func (g2 *G2) double(p *G2Affine) *G2Affine {
 	λ := g2.DivUnchecked(xx3a, y2)
 
 	// xr = λ²-2p.x
-	xr0 := g2.fp.Eval([][]*baseEl{{&λ.A0, &λ.A0}, {mone, &λ.A1, &λ.A1}, {mone, &p.P.X.A0}}, []int{1, 1, 2})
-	xr1 := g2.fp.Eval([][]*baseEl{{&λ.A0, &λ.A1}, {mone, &p.P.X.A1}}, []int{2, 2})
+	xr0 := g2.fp.Eval([][]*baseEl{{&λ.A0, &λ.A0}, {&λ.A1, &λ.A1}, {&p.P.X.A0}}, []int{1, -1, -2})
+	xr1 := g2.fp.Eval([][]*baseEl{{&λ.A0, &λ.A1}, {&p.P.X.A1}}, []int{2, -2})
 	xr := &fields_bls12381.E2{A0: *xr0, A1: *xr1}
 
 	// yr = λ(p-xr) - p.y
 	yr := g2.Ext2.Sub(&p.P.X, xr)
-	yr0 := g2.fp.Eval([][]*baseEl{{&λ.A0, &yr.A0}, {mone, &λ.A1, &yr.A1}, {mone, &p.P.Y.A0}}, []int{1, 1, 1})
-	yr1 := g2.fp.Eval([][]*baseEl{{&λ.A0, &yr.A1}, {&λ.A1, &yr.A0}, {mone, &p.P.Y.A1}}, []int{1, 1, 1})
+	yr0 := g2.fp.Eval([][]*baseEl{{&λ.A0, &yr.A0}, {&λ.A1, &yr.A1}, {&p.P.Y.A0}}, []int{1, -1, -1})
+	yr1 := g2.fp.Eval([][]*baseEl{{&λ.A0, &yr.A1}, {&λ.A1, &yr.A0}, {&p.P.Y.A1}}, []int{1, 1, -1})
 	yr = &fields_bls12381.E2{A0: *yr0, A1: *yr1}
 
 	return &G2Affine{
@@ -610,7 +622,6 @@ func (g2 *G2) doubleN(p *G2Affine, n int) *G2Affine {
 }
 
 func (g2 G2) triple(p *G2Affine) *G2Affine {
-	mone := g2.fp.NewElement(-1)
 
 	// compute λ1 = (3p.x²)/2p.y
 	xx := g2.Square(&p.P.X)
@@ -619,8 +630,8 @@ func (g2 G2) triple(p *G2Affine) *G2Affine {
 	λ1 := g2.DivUnchecked(xx, y2)
 
 	// x2 = λ1²-2p.x
-	x20 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A0}, {mone, &λ1.A1, &λ1.A1}, {mone, &p.P.X.A0}}, []int{1, 1, 2})
-	x21 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A1}, {mone, &p.P.X.A1}}, []int{2, 2})
+	x20 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A0}, {&λ1.A1, &λ1.A1}, {&p.P.X.A0}}, []int{1, -1, -2})
+	x21 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A1}, {&p.P.X.A1}}, []int{2, -2})
 	x2 := &fields_bls12381.E2{A0: *x20, A1: *x21}
 
 	// omit y2 computation, and
@@ -630,14 +641,14 @@ func (g2 G2) triple(p *G2Affine) *G2Affine {
 	λ2 = g2.Sub(λ2, λ1)
 
 	// compute x3 =λ2²-p.x-x2
-	x30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A0}, {mone, &λ2.A1, &λ2.A1}, {mone, &p.P.X.A0}, {mone, x20}}, []int{1, 1, 1, 1})
-	x31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A1}, {mone, &p.P.X.A1}, {mone, x21}}, []int{2, 1, 1})
+	x30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A0}, {&λ2.A1, &λ2.A1}, {&p.P.X.A0}, {x20}}, []int{1, -1, -1, -1})
+	x31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A1}, {&p.P.X.A1}, {x21}}, []int{2, -1, -1})
 	x3 := &fields_bls12381.E2{A0: *x30, A1: *x31}
 
 	// compute y3 = λ2*(p.x - x3)-p.y
 	y3 := g2.Ext2.Sub(&p.P.X, x3)
-	y30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A0}, {mone, &λ2.A1, &y3.A1}, {mone, &p.P.Y.A0}}, []int{1, 1, 1})
-	y31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A1}, {&λ2.A1, &y3.A0}, {mone, &p.P.Y.A1}}, []int{1, 1, 1})
+	y30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A0}, {&λ2.A1, &y3.A1}, {&p.P.Y.A0}}, []int{1, -1, -1})
+	y31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A1}, {&λ2.A1, &y3.A0}, {&p.P.Y.A1}}, []int{1, 1, -1})
 	y3 = &fields_bls12381.E2{A0: *y30, A1: *y31}
 
 	return &G2Affine{
@@ -649,7 +660,6 @@ func (g2 G2) triple(p *G2Affine) *G2Affine {
 }
 
 func (g2 G2) doubleAndAdd(p, q *G2Affine) *G2Affine {
-	mone := g2.fp.NewElement(-1)
 
 	// compute λ1 = (q.y-p.y)/(q.x-p.x)
 	yqyp := g2.Ext2.Sub(&q.P.Y, &p.P.Y)
@@ -657,8 +667,8 @@ func (g2 G2) doubleAndAdd(p, q *G2Affine) *G2Affine {
 	λ1 := g2.Ext2.DivUnchecked(yqyp, xqxp)
 
 	// compute x2 = λ1²-p.x-q.x
-	x20 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A0}, {mone, &λ1.A1, &λ1.A1}, {mone, &p.P.X.A0}, {mone, &q.P.X.A0}}, []int{1, 1, 1, 1})
-	x21 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A1}, {mone, &p.P.X.A1}, {mone, &q.P.X.A1}}, []int{2, 1, 1})
+	x20 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A0}, {&λ1.A1, &λ1.A1}, {&p.P.X.A0}, {&q.P.X.A0}}, []int{1, -1, -1, -1})
+	x21 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A1}, {&p.P.X.A1}, {&q.P.X.A1}}, []int{2, -1, -1})
 	x2 := &fields_bls12381.E2{A0: *x20, A1: *x21}
 
 	// omit y2 computation
@@ -669,14 +679,14 @@ func (g2 G2) doubleAndAdd(p, q *G2Affine) *G2Affine {
 	λ2 = g2.Ext2.Add(λ1, λ2)
 
 	// compute x3 = (-λ2)²-p.x-x2
-	x30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A0}, {mone, &λ2.A1, &λ2.A1}, {mone, &p.P.X.A0}, {mone, x20}}, []int{1, 1, 1, 1})
-	x31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A1}, {mone, &p.P.X.A1}, {mone, x21}}, []int{2, 1, 1})
+	x30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A0}, {&λ2.A1, &λ2.A1}, {&p.P.X.A0}, {x20}}, []int{1, -1, -1, -1})
+	x31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A1}, {&p.P.X.A1}, {x21}}, []int{2, -1, -1})
 	x3 := &fields_bls12381.E2{A0: *x30, A1: *x31}
 
 	// compute y3 = -λ2*(x3 - p.x)-p.y
 	y3 := g2.Ext2.Sub(x3, &p.P.X)
-	y30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A0}, {mone, &λ2.A1, &y3.A1}, {mone, &p.P.Y.A0}}, []int{1, 1, 1})
-	y31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A1}, {&λ2.A1, &y3.A0}, {mone, &p.P.Y.A1}}, []int{1, 1, 1})
+	y30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A0}, {&λ2.A1, &y3.A1}, {&p.P.Y.A0}}, []int{1, -1, -1})
+	y31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A1}, {&λ2.A1, &y3.A0}, {&p.P.Y.A1}}, []int{1, 1, -1})
 	y3 = &fields_bls12381.E2{A0: *y30, A1: *y31}
 
 	return &G2Affine{
@@ -695,7 +705,6 @@ func (g2 G2) doubleAndAdd(p, q *G2Affine) *G2Affine {
 // It first computes the x-coordinate of p+q via the slope(p,q)
 // and then based on a Select adds either p or q.
 func (g2 G2) doubleAndAddSelect(b frontend.Variable, p, q *G2Affine) *G2Affine {
-	mone := g2.fp.NewElement(-1)
 
 	// compute λ1 = (q.y-p.y)/(q.x-p.x)
 	yqyp := g2.Ext2.Sub(&q.P.Y, &p.P.Y)
@@ -703,8 +712,8 @@ func (g2 G2) doubleAndAddSelect(b frontend.Variable, p, q *G2Affine) *G2Affine {
 	λ1 := g2.Ext2.DivUnchecked(yqyp, xqxp)
 
 	// compute x2 = λ1²-p.x-q.x
-	x20 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A0}, {mone, &λ1.A1, &λ1.A1}, {mone, &p.P.X.A0}, {mone, &q.P.X.A0}}, []int{1, 1, 1, 1})
-	x21 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A1}, {mone, &p.P.X.A1}, {mone, &q.P.X.A1}}, []int{2, 1, 1})
+	x20 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A0}, {&λ1.A1, &λ1.A1}, {&p.P.X.A0}, {&q.P.X.A0}}, []int{1, -1, -1, -1})
+	x21 := g2.fp.Eval([][]*baseEl{{&λ1.A0, &λ1.A1}, {&p.P.X.A1}, {&q.P.X.A1}}, []int{2, -1, -1})
 	x2 := &fields_bls12381.E2{A0: *x20, A1: *x21}
 
 	// omit y2 computation
@@ -719,14 +728,14 @@ func (g2 G2) doubleAndAddSelect(b frontend.Variable, p, q *G2Affine) *G2Affine {
 	λ2 = g2.Ext2.Add(λ1, λ2)
 
 	// compute x3 = (-λ2)²-t.x-x2
-	x30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A0}, {mone, &λ2.A1, &λ2.A1}, {mone, &t.P.X.A0}, {mone, x20}}, []int{1, 1, 1, 1})
-	x31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A1}, {mone, &t.P.X.A1}, {mone, x21}}, []int{2, 1, 1})
+	x30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A0}, {&λ2.A1, &λ2.A1}, {&t.P.X.A0}, {x20}}, []int{1, -1, -1, -1})
+	x31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &λ2.A1}, {&t.P.X.A1}, {x21}}, []int{2, -1, -1})
 	x3 := &fields_bls12381.E2{A0: *x30, A1: *x31}
 
 	// compute y3 = -λ2*(x3 - t.x)-t.y
 	y3 := g2.Ext2.Sub(x3, &t.P.X)
-	y30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A0}, {mone, &λ2.A1, &y3.A1}, {mone, &t.P.Y.A0}}, []int{1, 1, 1})
-	y31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A1}, {&λ2.A1, &y3.A0}, {mone, &t.P.Y.A1}}, []int{1, 1, 1})
+	y30 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A0}, {&λ2.A1, &y3.A1}, {&t.P.Y.A0}}, []int{1, -1, -1})
+	y31 := g2.fp.Eval([][]*baseEl{{&λ2.A0, &y3.A1}, {&λ2.A1, &y3.A0}, {&t.P.Y.A1}}, []int{1, 1, -1})
 	y3 = &fields_bls12381.E2{A0: *y30, A1: *y31}
 
 	return &G2Affine{
@@ -749,10 +758,9 @@ func (g2 *G2) computeTwistEquation(Q *G2Affine) (left, right *fields_bls12381.E2
 	b := g2.Ext2.Select(selector, g2.Ext2.Zero(), &bTwist)
 
 	left = g2.Ext2.Square(&Q.P.Y)
-	mone := g2.fp.NewElement(-1)
 	right = &fields_bls12381.E2{
-		A0: *g2.fp.Eval([][]*baseEl{{&Q.P.X.A0, &Q.P.X.A0, &Q.P.X.A0}, {mone, &Q.P.X.A0, &Q.P.X.A1, &Q.P.X.A1}, {&b.A0}}, []int{1, 3, 1}),
-		A1: *g2.fp.Eval([][]*baseEl{{&Q.P.X.A1, &Q.P.X.A0, &Q.P.X.A0}, {mone, &Q.P.X.A1, &Q.P.X.A1, &Q.P.X.A1}, {&b.A1}}, []int{3, 1, 1}),
+		A0: *g2.fp.Eval([][]*baseEl{{&Q.P.X.A0, &Q.P.X.A0, &Q.P.X.A0}, {&Q.P.X.A0, &Q.P.X.A1, &Q.P.X.A1}, {&b.A0}}, []int{1, -3, 1}),
+		A1: *g2.fp.Eval([][]*baseEl{{&Q.P.X.A1, &Q.P.X.A0, &Q.P.X.A0}, {&Q.P.X.A1, &Q.P.X.A1, &Q.P.X.A1}, {&b.A1}}, []int{3, -1, 1}),
 	}
 
 	return left, right
@@ -980,7 +988,7 @@ func (g2 *G2) scalarMulGLV(Q *G2Affine, s *Scalar, opts ...algopts.AlgebraOption
 	//
 	// T = [3](Q + Φ(Q))
 	// P = B1 and P' = B1
-	T1 := g2.add(tableQ[2], tablePhiQ[2])
+	t1 := g2.add(tableQ[2], tablePhiQ[2])
 	// T = Q + Φ(Q)
 	// P = B1 and P' = B2
 	T2 := Acc
@@ -989,44 +997,32 @@ func (g2 *G2) scalarMulGLV(Q *G2Affine, s *Scalar, opts ...algopts.AlgebraOption
 	T3 := g2.add(tableQ[2], tablePhiQ[1])
 	// T = Q + [3]Φ(Q)
 	// P = B1 and P' = B4
-	T4 := g2.add(tableQ[1], tablePhiQ[2])
-	// T  = -Q - Φ(Q)
-	// P = B2 and P' = B1
-	T5 := g2.neg(T2)
+	t4 := g2.add(tableQ[1], tablePhiQ[2])
 	// T  = -[3](Q + Φ(Q))
 	// P = B2 and P' = B2
-	T6 := g2.neg(T1)
+	T6 := g2.neg(t1)
 	// T = -Q - [3]Φ(Q)
 	// P = B2 and P' = B3
-	T7 := g2.neg(T4)
-	// T = -[3]Q - Φ(Q)
-	// P = B2 and P' = B4
-	T8 := g2.neg(T3)
+	T7 := g2.neg(t4)
 	// T = [3]Q - Φ(Q)
 	// P = B3 and P' = B1
-	T9 := g2.add(tableQ[2], tablePhiQ[0])
+	t9 := g2.add(tableQ[2], tablePhiQ[0])
 	// T = Q - [3]Φ(Q)
 	// P = B3 and P' = B2
-	T11 := g2.neg(tablePhiQ[2])
-	T10 := g2.add(tableQ[1], T11)
+	t := g2.neg(tablePhiQ[2])
+	T10 := g2.add(tableQ[1], t)
 	// T = [3](Q - Φ(Q))
 	// P = B3 and P' = B3
-	T11 = g2.add(tableQ[2], T11)
+	T11 := g2.add(tableQ[2], t)
 	// T = -Φ(Q) + Q
 	// P = B3 and P' = B4
 	T12 := g2.add(tablePhiQ[0], tableQ[1])
-	// T = [3]Φ(Q) - Q
-	// P = B4 and P' = B1
-	T13 := g2.neg(T10)
 	// T = Φ(Q) - [3]Q
 	// P = B4 and P' = B2
-	T14 := g2.neg(T9)
+	T14 := g2.neg(t9)
 	// T = Φ(Q) - Q
 	// P = B4 and P' = B3
 	T15 := g2.neg(T12)
-	// T = [3](Φ(Q) - Q)
-	// P = B4 and P' = B4
-	T16 := g2.neg(T11)
 	// note that half the points are negatives of the other half,
 	// hence have the same X coordinates.
 
@@ -1046,24 +1042,18 @@ func (g2 *G2) scalarMulGLV(Q *G2Affine, s *Scalar, opts ...algopts.AlgebraOption
 			g2.api.Mul(selectorY, g2.api.Sub(1, g2.api.Mul(s2bits[i-1], 2))),
 			g2.api.Mul(s2bits[i-1], 15),
 		)
-		// Bi.Y are distincts so we need a 16-to-1 multiplexer,
-		// but only half of the Bi.X are distinct so we need a 8-to-1.
+		// Half of the Bi.X are distinct (8-to-1) and Y[i] = -Y[15-i],
+		// so we use 8-to-1 Mux for both X and Y, with conditional negation for Y.
 		T := &G2Affine{
 			P: g2AffP{
 				X: fields_bls12381.E2{
 					A0: *g2.fp.Mux(selectorX, &T6.P.X.A0, &T10.P.X.A0, &T14.P.X.A0, &T2.P.X.A0, &T7.P.X.A0, &T11.P.X.A0, &T15.P.X.A0, &T3.P.X.A0),
 					A1: *g2.fp.Mux(selectorX, &T6.P.X.A1, &T10.P.X.A1, &T14.P.X.A1, &T2.P.X.A1, &T7.P.X.A1, &T11.P.X.A1, &T15.P.X.A1, &T3.P.X.A1),
 				},
-				Y: fields_bls12381.E2{
-					A0: *g2.fp.Mux(selectorY,
-						&T6.P.Y.A0, &T10.P.Y.A0, &T14.P.Y.A0, &T2.P.Y.A0, &T7.P.Y.A0, &T11.P.Y.A0, &T15.P.Y.A0, &T3.P.Y.A0,
-						&T8.P.Y.A0, &T12.P.Y.A0, &T16.P.Y.A0, &T4.P.Y.A0, &T5.P.Y.A0, &T9.P.Y.A0, &T13.P.Y.A0, &T1.P.Y.A0,
-					),
-					A1: *g2.fp.Mux(selectorY,
-						&T6.P.Y.A1, &T10.P.Y.A1, &T14.P.Y.A1, &T2.P.Y.A1, &T7.P.Y.A1, &T11.P.Y.A1, &T15.P.Y.A1, &T3.P.Y.A1,
-						&T8.P.Y.A1, &T12.P.Y.A1, &T16.P.Y.A1, &T4.P.Y.A1, &T5.P.Y.A1, &T9.P.Y.A1, &T13.P.Y.A1, &T1.P.Y.A1,
-					),
-				},
+				Y: *g2.muxE2Y8Signed(s2bits[i-1], selectorX,
+					[8]*emulated.Element[BaseField]{&T6.P.Y.A0, &T10.P.Y.A0, &T14.P.Y.A0, &T2.P.Y.A0, &T7.P.Y.A0, &T11.P.Y.A0, &T15.P.Y.A0, &T3.P.Y.A0},
+					[8]*emulated.Element[BaseField]{&T6.P.Y.A1, &T10.P.Y.A1, &T14.P.Y.A1, &T2.P.Y.A1, &T7.P.Y.A1, &T11.P.Y.A1, &T15.P.Y.A1, &T3.P.Y.A1},
+				),
 			},
 		}
 		// Acc = [4]Acc + T

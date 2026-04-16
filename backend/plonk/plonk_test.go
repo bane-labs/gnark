@@ -72,7 +72,6 @@ func TestCustomHashToField(t *testing.T) {
 	assert := test.NewAssert(t)
 	assignment := &commitmentCircuit{X: 1}
 	for _, curve := range getCurves() {
-		curve := curve
 		assert.Run(func(assert *test.Assert) {
 			ccs, err := frontend.Compile(curve.ScalarField(), scs.NewBuilder, &commitmentCircuit{})
 			assert.NoError(err)
@@ -112,7 +111,6 @@ func TestCustomChallengeHash(t *testing.T) {
 	assert := test.NewAssert(t)
 	assignment := &smallCircuit{X: 1}
 	for _, curve := range getCurves() {
-		curve := curve
 		assert.Run(func(assert *test.Assert) {
 			ccs, err := frontend.Compile(curve.ScalarField(), scs.NewBuilder, &smallCircuit{})
 			assert.NoError(err)
@@ -155,7 +153,6 @@ func TestCustomKZGFoldingHash(t *testing.T) {
 	assert := test.NewAssert(t)
 	assignment := &smallCircuit{X: 1}
 	for _, curve := range getCurves() {
-		curve := curve
 		assert.Run(func(assert *test.Assert) {
 			ccs, err := frontend.Compile(curve.ScalarField(), scs.NewBuilder, &smallCircuit{})
 			assert.NoError(err)
@@ -253,6 +250,55 @@ func BenchmarkVerifier(b *testing.B) {
 				_ = plonk.Verify(proof, vk, publicWitness)
 			}
 		})
+	}
+}
+
+// BenchmarkLargeProver benchmarks the prover on a circuit slightly over 1<<21
+// constraints, so the domain is 1<<22. The large padding region (~1.8M entries)
+// exercises the partial-MSM + padding commitment optimization in commitToLRO.
+func BenchmarkLargeProver(b *testing.B) {
+	const nbConstraints = 1<<21 + 100_000 // ~2.2M → domain 1<<22, padding ~1.8M
+
+	circuit := refCircuit{nbConstraints: nbConstraints}
+	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), scs.NewBuilder, &circuit)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Logf("constraints: %d, domain: next power of 2 = %d", ccs.GetNbConstraints(), 1<<22)
+
+	// X=1 → 1*1=1 at every gate, Y=1
+	var good refCircuit
+	good.X = 1
+	good.Y = 1
+	fullWitness, err := frontend.NewWitness(&good, ecc.BN254.ScalarField())
+	if err != nil {
+		b.Fatal(err)
+	}
+	srs, srsLagrange, err := unsafekzg.NewSRS(ccs, unsafekzg.WithFSCache())
+	if err != nil {
+		b.Fatal(err)
+	}
+	pk, vk, err := plonk.Setup(ccs, srs, srsLagrange)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// sanity check: prove + verify once
+	proof, err := plonk.Prove(ccs, pk, fullWitness)
+	if err != nil {
+		b.Fatal(err)
+	}
+	pubWitness, err := fullWitness.Public()
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := plonk.Verify(proof, vk, pubWitness); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = plonk.Prove(ccs, pk, fullWitness)
 	}
 }
 

@@ -38,8 +38,18 @@ type API interface {
 	// Mul returns res = i1 * i2 * ... in
 	Mul(i1, i2 Variable, in ...Variable) Variable
 
-	// DivUnchecked returns i1 / i2
-	// If i1 == i2 == 0, the return value (0) is unconstrained.
+	// DivUnchecked returns i1 / i2.
+	//
+	// If i2 == 0, the behavior is backend-dependent and should be considered
+	// undetermined.
+	//
+	// Current behavior for zero denominators:
+	//   - constant zero denominator: compile-time error
+	//   - R1CS: for 0/0 the output is left unconstrained and the solver returns 0.
+	//     For x/0 with x!=0, the constraint is unsatisfiable.
+	//   - SCS: for 0/0 the output is left unconstrained, but the default solver fails.
+	//     For x/0 with x!=0, the constraint is unsatisfiable.
+	//   - test engine: fails
 	DivUnchecked(i1, i2 Variable) Variable
 
 	// Div returns i1 / i2
@@ -121,7 +131,7 @@ type API interface {
 	//
 	// If the absolute difference between the variables b and bound is known, then
 	// it is more efficient to use the bounded methods in package
-	// [github.com/consensys/gnark/std/math/bits].
+	// [github.com/consensys/gnark/std/math/cmp].
 	AssertIsLessOrEqual(v Variable, bound Variable)
 
 	// Println behaves like fmt.Println but accepts frontend.Variable as parameter
@@ -142,14 +152,24 @@ type API interface {
 	ConstantValue(v Variable) (*big.Int, bool)
 }
 
-// BatchInverter returns a slice of variables containing the inverse of each element in i1
-// This is a temporary API, do not use it in your circuit
+// BatchInverter returns a slice of variables containing the inverse of each element in i1.
+//
+// NB! This is a temporary API, do not use it in your circuit
+//
+// Wrapped builder may implement a more efficient version of this method. This
+// is not implemented for gnark builders. It is implemented for test engine for
+// efficiency purposes.
 type BatchInverter interface {
-	// BatchInvert returns a slice of variables containing the inverse of each element in i1
+	// BatchInvert returns a slice of variables containing the inverse of each element in i1.
 	// This is a temporary API, do not use it in your circuit
 	BatchInvert(i1 []Variable) []Variable
 }
 
+// PlonkAPI represents specific methods implemented by PLONK (sparse-R1CS)
+// constraint system builders. These methods are not part of the generic [API]
+// and [Builder] interfaces to ensure circuit compatibility with different
+// frontends (R1CS etc.). Any user using this interface should have a fallback
+// if the underlying builder does not implement it.
 type PlonkAPI interface {
 	// EvaluatePlonkExpression returns res = qL.a + qR.b + qM.ab + qC
 	EvaluatePlonkExpression(a, b Variable, qL, qR, qM, qC int) Variable

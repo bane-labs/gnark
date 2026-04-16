@@ -45,6 +45,8 @@ import (
 
 	"github.com/consensys/gnark/constraint/solver"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/internal/smallfields"
+	"github.com/consensys/gnark/std/internal/fieldextension"
 	"github.com/consensys/gnark/std/internal/mimc"
 	"github.com/consensys/gnark/std/multicommit"
 )
@@ -55,7 +57,7 @@ func init() {
 
 // GetHints returns all hints used in this package
 func GetHints() []solver.Hint {
-	return []solver.Hint{countHint}
+	return []solver.Hint{countHint, batchDivBySubHint}
 }
 
 // Table is a vector of vectors.
@@ -115,35 +117,113 @@ func Build(api frontend.API, table Table, queries Table) error {
 	}
 	toCommit = append(toCommit, exps...)
 
-	multicommit.WithCommitment(api, func(api frontend.API, commitment frontend.Variable) error {
-		rowCoeffs, challenge := randLinearCoefficients(api, nbRow, commitment)
-		var lp frontend.Variable = 0
-		for i := range table {
-			tmp := api.DivUnchecked(exps[i], api.Sub(challenge, randLinearCombination(api, rowCoeffs, table[i])))
-			lp = api.Add(lp, tmp)
-		}
-		var rp frontend.Variable = 0
+	if !smallfields.IsSmallField(api.Compiler().Field()) {
+		// handle the commitment over large fields directly
+		multicommit.WithCommitment(api, func(api frontend.API, commitment frontend.Variable) error {
+			rowCoeffs, challenge := randLinearCoefficients(api, nbRow, commitment)
+			var leftQuotients []frontend.Variable
 
-		toInvert := make([]frontend.Variable, len(queries))
-		for i := range queries {
-			toInvert[i] = api.Sub(challenge, randLinearCombination(api, rowCoeffs, queries[i]))
-		}
-
-		if bapi, ok := api.(frontend.BatchInverter); ok {
-			toInvert = bapi.BatchInvert(toInvert)
-		} else {
-			for i := range toInvert {
-				toInvert[i] = api.Inverse(toInvert[i])
+			// For constant single-column tables with PlonkAPI, merge Sub+DivUnchecked
+			// into a single PLONK gate per table entry (2 gates instead of 3).
+			plonkAPI, useOptimizedTable := api.(frontend.PlonkAPI)
+			if useOptimizedTable && constTable && nbRow == 1 {
+				// verify all constant values fit in int (required by AddPlonkConstraint)
+				for i := range table {
+					cv, _ := api.Compiler().ConstantValue(table[i][0])
+					if cv == nil || !cv.IsInt64() {
+						useOptimizedTable = false
+						break
+					}
+				}
+			} else {
+				useOptimizedTable = false
 			}
-		}
 
-		for i := range queries {
-			// tmp := api.Inverse(api.Sub(challenge, randLinearCombination(api, rowCoeffs, queries[i])))
-			rp = api.Add(rp, toInvert[i])
+			if useOptimizedTable {
+				n := len(table)
+				hintInputs := make([]frontend.Variable, 1+2*n)
+				hintInputs[0] = challenge
+				for i := range table {
+					hintInputs[1+i] = exps[i]
+					hintInputs[1+n+i] = table[i][0]
+				}
+				leftQuotients, err = api.NewHint(batchDivBySubHint, n, hintInputs...)
+				if err != nil {
+					return fmt.Errorf("batch div hint: %w", err)
+				}
+				for i := range table {
+					constVal, _ := api.Compiler().ConstantValue(table[i][0])
+					c := int(constVal.Int64())
+					// Verify quotient[i] * (challenge - c) == exps[i] in one PLONK gate:
+					// qM*q*ch + qL*q + qR*ch + qO*exps + qC = 0
+					// 1*q*ch + (-c)*q + 0*ch + (-1)*exps + 0 = 0
+					// => q*(ch - c) = exps
+					plonkAPI.AddPlonkConstraint(leftQuotients[i], challenge, exps[i], -c, 0, -1, 1, 0)
+				}
+			} else {
+				leftQuotients = make([]frontend.Variable, len(table))
+				for i := range table {
+					leftQuotients[i] = api.DivUnchecked(exps[i], api.Sub(challenge, randLinearCombination(api, rowCoeffs, table[i])))
+				}
+			}
+
+			rightInverses := make([]frontend.Variable, len(queries))
+			for i := range queries {
+				rightInverses[i] = api.Sub(challenge, randLinearCombination(api, rowCoeffs, queries[i]))
+			}
+
+			if bapi, ok := api.(frontend.BatchInverter); ok {
+				rightInverses = bapi.BatchInvert(rightInverses)
+			} else {
+				for i := range rightInverses {
+					rightInverses[i] = api.Inverse(rightInverses[i])
+				}
+			}
+
+			leftQuotientSum := sumVariables(api, leftQuotients)
+			rightInversesSum := sumVariables(api, rightInverses)
+			api.AssertIsEqual(leftQuotientSum, rightInversesSum)
+			return nil
+		}, toCommit...)
+	} else {
+		// when the native field is small field, then we need to use WithWideCommitment
+		extapi, err := fieldextension.NewExtension(api)
+		if err != nil {
+			return fmt.Errorf("create field extension: %w", err)
 		}
-		api.AssertIsEqual(lp, rp)
-		return nil
-	}, toCommit...)
+		multicommit.WithWideCommitment(api, func(api frontend.API, commitment []frontend.Variable) error {
+			rowCoeffs, challenge := randLinearCofficientsExt(extapi, nbRow, fieldextension.Element(commitment))
+			leftQuotientsTerms := make([]fieldextension.Element, len(table))
+			tableEntriesExts := make([]fieldextension.Element, nbRow)
+			for i := range table {
+				for j := range tableEntriesExts {
+					tableEntriesExts[j] = extapi.AsExtensionVariable(table[i][j])
+				}
+				tableComb := randLinearCombinationExt(extapi, rowCoeffs, tableEntriesExts)
+				denom := extapi.Sub(challenge, tableComb)
+				denom = extapi.Inverse(denom)
+				expEntryExt := extapi.AsExtensionVariable(exps[i])
+				leftQuotientsTerms[i] = extapi.Mul(expEntryExt, denom)
+			}
+
+			rightInversesTerms := make([]fieldextension.Element, len(queries))
+			queryEntryExts := make([]fieldextension.Element, nbRow)
+			for i := range queries {
+				for j := range queryEntryExts {
+					queryEntryExts[j] = extapi.AsExtensionVariable(queries[i][j])
+				}
+				queryEntryExt := randLinearCombinationExt(extapi, rowCoeffs, queryEntryExts)
+				denom := extapi.Sub(challenge, queryEntryExt)
+				denom = extapi.Inverse(denom)
+				rightInversesTerms[i] = denom
+			}
+			leftQuotientsTermsSum := sumVariablesExt(extapi, leftQuotientsTerms)
+			rightInversesTermsSum := sumVariablesExt(extapi, rightInversesTerms)
+			extapi.AssertIsEqual(leftQuotientsTermsSum, rightInversesTermsSum)
+			return nil
+		}, extapi.Degree(), toCommit...)
+	}
+
 	return nil
 }
 
@@ -166,6 +246,20 @@ func randLinearCoefficients(api frontend.API, nbRow int, commitment frontend.Var
 	return rowCoeffs, commitment
 }
 
+func randLinearCofficientsExt(extapi fieldextension.Field, nbRow int, commitment fieldextension.Element) (rowCoeffs []fieldextension.Element, challenge fieldextension.Element) {
+	if nbRow == 1 {
+		// to avoid initializing the hasher.
+		return []fieldextension.Element{extapi.One()}, commitment
+	}
+	// we don't have a hash function over extensions yet. So we use 1, ch, ch^2, ...
+	rowCoeffs = make([]fieldextension.Element, nbRow)
+	rowCoeffs[0] = extapi.One()
+	for i := 1; i < nbRow; i++ {
+		rowCoeffs[i] = extapi.Mul(rowCoeffs[i-1], commitment)
+	}
+	return rowCoeffs, commitment
+}
+
 func randLinearCombination(api frontend.API, rowCoeffs []frontend.Variable, row []frontend.Variable) frontend.Variable {
 	if len(rowCoeffs) != len(row) {
 		panic("coefficient count mismatch")
@@ -175,6 +269,44 @@ func randLinearCombination(api frontend.API, rowCoeffs []frontend.Variable, row 
 		res = api.Add(res, api.Mul(rowCoeffs[i], row[i]))
 	}
 	return res
+}
+
+func randLinearCombinationExt(extapi fieldextension.Field, rowCoeffs []fieldextension.Element, row []fieldextension.Element) fieldextension.Element {
+	if len(rowCoeffs) != len(row) {
+		panic("coefficient count mismatch")
+	}
+	res := extapi.Zero()
+	for i := range rowCoeffs {
+		term := extapi.Mul(rowCoeffs[i], row[i])
+		res = extapi.Add(res, term)
+	}
+	return res
+}
+
+// batchDivBySubHint computes outputs[i] = inputs[1+i] / (inputs[0] - inputs[1+n+i])
+// where n = len(outputs).
+// inputs: [challenge, numerator_0, ..., numerator_{n-1}, denomOffset_0, ..., denomOffset_{n-1}]
+// outputs: [quotient_0, ..., quotient_{n-1}]
+func batchDivBySubHint(m *big.Int, inputs []*big.Int, outputs []*big.Int) error {
+	n := len(outputs)
+	if len(inputs) != 1+2*n {
+		return fmt.Errorf("expected %d inputs, got %d", 1+2*n, len(inputs))
+	}
+	challenge := inputs[0]
+	diff := new(big.Int)
+	for i := 0; i < n; i++ {
+		numerator := inputs[1+i]
+		tableVal := inputs[1+n+i]
+		diff.Sub(challenge, tableVal)
+		diff.Mod(diff, m)
+		diffInv := new(big.Int).ModInverse(diff, m)
+		if diffInv == nil {
+			return fmt.Errorf("no modular inverse at index %d", i)
+		}
+		outputs[i].Mul(numerator, diffInv)
+		outputs[i].Mod(outputs[i], m)
+	}
+	return nil
 }
 
 func countHint(m *big.Int, inputs []*big.Int, outputs []*big.Int) error {
@@ -234,4 +366,38 @@ func countHint(m *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 		outputs[i].Set(big.NewInt(histo[string(buf)]))
 	}
 	return nil
+}
+
+// sumVariables sums the variables in vars using a tree to reduce levels (searchstring for grepping "add-using-tree").
+func sumVariables(api frontend.API, vars []frontend.Variable) frontend.Variable {
+	for len(vars) > 1 {
+		for i := range len(vars) / 2 {
+			vars[i] = api.Add(vars[2*i], vars[2*i+1])
+		}
+		if len(vars)%2 == 1 {
+			vars[len(vars)/2] = vars[len(vars)-1]
+		}
+		vars = vars[:(len(vars)+1)/2]
+	}
+	if len(vars) == 0 {
+		return 0
+	}
+	return vars[0]
+}
+
+// sumVariablesExt sums the variables in vars using a tree to reduce levels (searchstring for grepping "add-using-tree").
+func sumVariablesExt(extapi fieldextension.Field, vars []fieldextension.Element) fieldextension.Element {
+	for len(vars) > 1 {
+		for i := range len(vars) / 2 {
+			vars[i] = extapi.Add(vars[2*i], vars[2*i+1])
+		}
+		if len(vars)%2 == 1 {
+			vars[len(vars)/2] = vars[len(vars)-1]
+		}
+		vars = vars[:(len(vars)+1)/2]
+	}
+	if len(vars) == 0 {
+		return extapi.Zero()
+	}
+	return vars[0]
 }

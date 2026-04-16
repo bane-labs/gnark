@@ -3,15 +3,25 @@ package emulated
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"math/bits"
 	"slices"
+	"sync"
 
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/profile"
+	"github.com/consensys/gnark/std/internal/fieldextension"
 	limbs "github.com/consensys/gnark/std/internal/limbcomposition"
-	"github.com/consensys/gnark/std/math/fieldextension"
 	"github.com/consensys/gnark/std/multicommit"
 )
+
+// bigIntPool for using in hints to avoid excessive allocations
+var bigIntPool = sync.Pool{
+	New: func() any {
+		return new(big.Int)
+	},
+}
 
 // deferredChecker is an interface for deferring a check in non-native
 // arithmetic. The idea of the deferred check is that we do not compute the
@@ -85,7 +95,7 @@ type deferredChecker interface {
 //
 // Given these values, the following holds:
 //
-//	a * b = r * k*p
+//	a * b = r + k*p
 //
 // But for asserting that the previous equation holds, we instead use the
 // polynomial representation of the elements. If a non-native element a is given
@@ -231,8 +241,28 @@ func (f *Field[T]) mulMod(a, b *Element[T], _ uint, p *Element[T]) *Element[T] {
 	if a.isStrictZero() || b.isStrictZero() {
 		return f.Zero()
 	}
+	if p == nil {
+		// fast path - constant multiplication can be folded directly without
+		// creating a hinted reduction or carrying synthetic overflow metadata.
+		if ba, aConst := f.constantValue(a); aConst {
+			if bb, bConst := f.constantValue(b); bConst {
+				ba.Mul(ba, bb).Mod(ba, f.fParams.Modulus())
+				return newConstElement[T](f.api.Compiler().Field(), ba, false)
+			}
+		}
+	}
 	f.enforceWidthConditional(a)
 	f.enforceWidthConditional(b)
+
+	// Use small field optimization if available and no custom modulus
+	if p == nil && f.useSmallFieldOptimization() {
+		// For small field mode, ensure elements are single-limb
+		// If they have more limbs due to witness initialization, convert them
+		aLimb := f.toSingleLimbElement(a)
+		bLimb := f.toSingleLimbElement(b)
+		return f.smallMulMod(aLimb, bLimb)
+	}
+
 	f.enforceWidthConditional(p)
 	k, r, c, err := f.callMulHint(a, b, true, p)
 	if err != nil {
@@ -248,6 +278,10 @@ func (f *Field[T]) mulMod(a, b *Element[T], _ uint, p *Element[T]) *Element[T] {
 		p: p,
 	}
 	f.deferredChecks = append(f.deferredChecks, &mc)
+	// Record operation for profiling - this tracks the operation at call site
+	// independently of when the actual constraints are created in deferred callbacks.
+	// Include limb count in the name for visibility in pprof flamegraphs.
+	profile.RecordOperation("emulated.MulMod", len(a.Limbs)+len(b.Limbs)+len(r.Limbs)+len(k.Limbs)+len(c.Limbs))
 	return r
 }
 
@@ -257,9 +291,18 @@ func (f *Field[T]) checkZero(a *Element[T], p *Element[T]) {
 	if a.isStrictZero() {
 		return
 	}
+
+	f.enforceWidthConditional(a)
+
+	// Use small field optimization if available and no custom modulus
+	if p == nil && f.useSmallFieldOptimization() {
+		aLimb := f.toSingleLimbElement(a)
+		f.smallCheckZero(aLimb)
+		return
+	}
+
 	// the method works similarly to mulMod, but we know that we are multiplying
 	// by one and expected result should be zero.
-	f.enforceWidthConditional(a)
 	f.enforceWidthConditional(p)
 	b := f.One()
 	k, r, c, err := f.callMulHint(a, b, false, p)
@@ -276,6 +319,10 @@ func (f *Field[T]) checkZero(a *Element[T], p *Element[T]) {
 		p: p,
 	}
 	f.deferredChecks = append(f.deferredChecks, &mc)
+
+	// Record operation for profiling - this tracks the operation at call site
+	// independently of when the actual constraints are created in deferred callbacks.
+	profile.RecordOperation("emulated.CheckZero", len(a.Limbs)+len(k.Limbs)+len(c.Limbs))
 }
 
 // evalWithChallenge represents element a as a polynomial a(X) and evaluates at
@@ -444,7 +491,7 @@ func (f *Field[T]) performDeferredChecks(api frontend.API) error {
 func (f *Field[T]) callMulHint(a, b *Element[T], isMulMod bool, customMod *Element[T]) (quo, rem, carries *Element[T], err error) {
 	// compute the expected overflow after the multiplication of a*b to be able
 	// to estimate the number of bits required to represent the result.
-	nextOverflow, _ := f.mulPreCond(a, b)
+	nextOverflow := f.mulResultOverflow(a, b)
 	// skip error handle - it happens when we are supposed to reduce. But we
 	// already check it as a precondition. We only need the overflow here.
 	if !isMulMod {
@@ -535,9 +582,14 @@ func mulHint(field *big.Int, inputs, outputs []*big.Int) error {
 	outptr += nbLimbs
 	carryLimbs := outputs[outptr : outptr+nbCarryLen]
 
-	p := new(big.Int)
-	a := new(big.Int)
-	b := new(big.Int)
+	var (
+		p = bigIntPool.Get().(*big.Int)
+		a = bigIntPool.Get().(*big.Int)
+		b = bigIntPool.Get().(*big.Int)
+	)
+	defer bigIntPool.Put(p)
+	defer bigIntPool.Put(a)
+	defer bigIntPool.Put(b)
 	if err := limbs.Recompose(plimbs, uint(nbBits), p); err != nil {
 		return fmt.Errorf("recompose p: %w", err)
 	}
@@ -547,10 +599,16 @@ func mulHint(field *big.Int, inputs, outputs []*big.Int) error {
 	if err := limbs.Recompose(blimbs, uint(nbBits), b); err != nil {
 		return fmt.Errorf("recompose b: %w", err)
 	}
-	quo := new(big.Int)
-	rem := new(big.Int)
-	ab := new(big.Int).Mul(a, b)
-	if p.Cmp(new(big.Int)) != 0 {
+	quo := bigIntPool.Get().(*big.Int)
+	rem := bigIntPool.Get().(*big.Int)
+	defer bigIntPool.Put(quo)
+	defer bigIntPool.Put(rem)
+	quo.SetInt64(0)
+	rem.SetInt64(0)
+	ab := bigIntPool.Get().(*big.Int)
+	defer bigIntPool.Put(ab)
+	ab.Mul(a, b)
+	if p.Sign() != 0 {
 		quo.QuoRem(ab, p, rem)
 	}
 	if err := limbs.Decompose(quo, uint(nbBits), quoLimbs); err != nil {
@@ -569,10 +627,15 @@ func mulHint(field *big.Int, inputs, outputs []*big.Int) error {
 		if i < len(rhs) {
 			rhs[i].Add(rhs[i], remLimbs[i])
 		} else {
-			rhs = append(rhs, new(big.Int).Set(remLimbs[i]))
+			remLimb := bigIntPool.Get().(*big.Int)
+			defer bigIntPool.Put(remLimb)
+			remLimb.Set(remLimbs[i])
+			rhs = append(rhs, remLimb)
 		}
 	}
-	carry := new(big.Int)
+	carry := bigIntPool.Get().(*big.Int)
+	defer bigIntPool.Put(carry)
+	carry.SetInt64(0)
 	for i := range carryLimbs {
 		if i < len(lhs) {
 			carry.Add(carry, lhs[i])
@@ -581,14 +644,21 @@ func mulHint(field *big.Int, inputs, outputs []*big.Int) error {
 			carry.Sub(carry, rhs[i])
 		}
 		carry.Rsh(carry, uint(nbBits))
-		carryLimbs[i] = new(big.Int).Set(carry)
+		carryLimbs[i].Set(carry)
 	}
 	return nil
 }
 
-// Mul computes a*b and reduces it modulo the field order. The returned Element
-// has default number of limbs and zero overflow. If the result wouldn't fit
-// into Element, then locally reduces the inputs first. Doesn't mutate inputs.
+// Mul computes a*b. Depending on the emulated field it either reduces the result
+// modulo the field order or returns the full product.
+//
+// When emulating large field, the uses reducing multiplication by default.
+//
+// If the field is small (fits into single limb), then it uses non-reducing
+// multiplication by default for efficiency. It only falls back to reducing
+// multiplication when the overflow of the result would be too large.
+//
+// Doesn't mutate inputs.
 //
 // For multiplying by a constant, use [Field[T].MulConst] method which is more
 // efficient.
@@ -597,7 +667,13 @@ func (f *Field[T]) Mul(a, b *Element[T]) *Element[T] {
 	if a.isStrictZero() || b.isStrictZero() {
 		return f.Zero()
 	}
-	return f.reduceAndOp(func(a, b *Element[T], u uint) *Element[T] { return f.mulMod(a, b, u, nil) }, f.mulPreCond, a, b)
+	if f.useSmallFieldOptimization() {
+		// for small fields, it is more efficient to use non-reducing multiplication by default
+		// we only fall back to reducing multiplication when modular reduction is necessary
+		// to reduce the overflow
+		return f.reduceAndOp(f.mulNoReduce, f.mulPreCondNoReduce, a, b)
+	}
+	return f.reduceAndOp(func(a, b *Element[T], u uint) *Element[T] { return f.mulMod(a, b, u, nil) }, f.mulPreCondReduced, a, b)
 }
 
 // MulMod computes a*b and reduces it modulo the field order. The returned Element
@@ -609,7 +685,7 @@ func (f *Field[T]) MulMod(a, b *Element[T]) *Element[T] {
 	if a.isStrictZero() || b.isStrictZero() {
 		return f.Zero()
 	}
-	return f.reduceAndOp(func(a, b *Element[T], u uint) *Element[T] { return f.mulMod(a, b, u, nil) }, f.mulPreCond, a, b)
+	return f.reduceAndOp(func(a, b *Element[T], u uint) *Element[T] { return f.mulMod(a, b, u, nil) }, f.mulPreCondReduced, a, b)
 }
 
 // MulConst multiplies a by a constant c and returns it. We assume that the
@@ -623,7 +699,7 @@ func (f *Field[T]) MulConst(a *Element[T], c *big.Int) *Element[T] {
 	}
 	switch c.Sign() {
 	case -1:
-		f.MulConst(f.Neg(a), new(big.Int).Neg(c))
+		return f.MulConst(f.Neg(a), new(big.Int).Neg(c))
 	case 0:
 		return f.Zero()
 	}
@@ -654,16 +730,43 @@ func (f *Field[T]) MulConst(a *Element[T], c *big.Int) *Element[T] {
 	)
 }
 
-func (f *Field[T]) mulPreCond(a, b *Element[T]) (nextOverflow uint, err error) {
-	reduceRight := a.overflow < b.overflow
+// mulResultOverflow computes the maximum overflow of the limbwise
+// multiplications of a*b. This is used to determine whether the multiplication
+// can be safely performed without exceeding the field limits.
+func (f *Field[T]) mulResultOverflow(a, b *Element[T]) (overflow uint) {
 	nbResLimbs := nbMultiplicationResLimbs(len(a.Limbs), len(b.Limbs))
 	nbLimbsOverflow := uint(1)
 	if nbResLimbs > 0 {
 		nbLimbsOverflow = uint(bits.Len(uint(nbResLimbs)))
 	}
-	nextOverflow = f.fParams.BitsPerLimb() + nbLimbsOverflow + a.overflow + b.overflow
+	overflow = f.fParams.BitsPerLimb() + nbLimbsOverflow + a.overflow + b.overflow
+	return overflow
+}
+
+// mulPreCondReduced is a precondition to check if the multiplication a*b can be safely
+// checked, assuming the result will be reduced modulo the field order.
+//
+// As the result and quotient will be reduced (overflow=0), then this condition checks that
+// only the carries can fit into the native field.
+func (f *Field[T]) mulPreCondReduced(a, b *Element[T]) (nextOverflow uint, err error) {
+	reduceRight := a.overflow < b.overflow
+	nextOverflow = f.mulResultOverflow(a, b)
+	if nextOverflow > f.maxOverflowReducedResult() {
+		err = overflowError{op: "mul", nextOverflow: nextOverflow, maxOverflow: f.maxOverflowReducedResult(), reduceRight: reduceRight}
+	}
+	return
+}
+
+// mulPreCondNoReduce is a precondition to check if the multiplication a*b can be safely
+// checked, assuming the result will NOT be reduced modulo the field order.
+//
+// As the result will not be reduced, then we need to ensure that the full
+// multiplication result can fit into the native field.
+func (f *Field[T]) mulPreCondNoReduce(a, b *Element[T]) (nextOverflow uint, err error) {
+	reduceRight := a.overflow < b.overflow
+	nextOverflow = f.mulResultOverflow(a, b)
 	if nextOverflow > f.maxOverflow() {
-		err = overflowError{op: "mul", nextOverflow: nextOverflow, maxOverflow: f.maxOverflow(), reduceRight: reduceRight}
+		err = overflowError{op: "mulNoReduce", nextOverflow: nextOverflow, maxOverflow: f.maxOverflow(), reduceRight: reduceRight}
 	}
 	return
 }
@@ -676,10 +779,19 @@ func (f *Field[T]) MulNoReduce(a, b *Element[T]) *Element[T] {
 	if a.isStrictZero() || b.isStrictZero() {
 		return f.Zero()
 	}
-	return f.reduceAndOp(f.mulNoReduce, f.mulPreCond, a, b)
+	return f.reduceAndOp(f.mulNoReduce, f.mulPreCondNoReduce, a, b)
 }
 
 func (f *Field[T]) mulNoReduce(a, b *Element[T], nextoverflow uint) *Element[T] {
+	// fast path - constant multiplication stays constant even on the
+	// non-reducing path, so avoid growing overflow on a value the compiler can
+	// still recognize as constant.
+	if ba, aConst := f.constantValue(a); aConst {
+		if bb, bConst := f.constantValue(b); bConst {
+			ba.Mul(ba, bb).Mod(ba, f.fParams.Modulus())
+			return newConstElement[T](f.api.Compiler().Field(), ba, false)
+		}
+	}
 	resLimbs := make([]frontend.Variable, nbMultiplicationResLimbs(len(a.Limbs), len(b.Limbs)))
 	for i := range resLimbs {
 		resLimbs[i] = 0
@@ -689,25 +801,80 @@ func (f *Field[T]) mulNoReduce(a, b *Element[T], nextoverflow uint) *Element[T] 
 			resLimbs[i+j] = f.api.MulAcc(resLimbs[i+j], a.Limbs[i], b.Limbs[j])
 		}
 	}
+	profile.RecordOperation("emulated.MulNoReduce", 2*len(resLimbs))
 	return f.newInternalElement(resLimbs, nextoverflow)
 }
 
 // Exp computes base^exp modulo the field order. The returned Element has default
 // number of limbs and zero overflow.
+//
+// The implementation uses windowed exponentiation with window size 4, which
+// reduces the number of multiplications compared to binary square-and-multiply.
 func (f *Field[T]) Exp(base, exp *Element[T]) *Element[T] {
 	// fast path - if the base is zero, then the result is also zero
 	if base.isStrictZero() {
 		return f.Zero()
 	}
+
+	const windowSize = 4
+	const tableSize = 1 << windowSize // 16
+
+	// Build precomputation table: table[i] = base^i for i in [0, 2^windowSize)
+	table := make([]*Element[T], tableSize)
+	table[0] = f.One()
+	table[1] = base
+	for i := 2; i < tableSize; i++ {
+		table[i] = f.MulMod(table[i-1], base)
+	}
+
+	// Get exponent bits (LSB first)
 	expBts := f.ToBits(exp)
 	n := len(expBts)
-	res := f.Select(expBts[0], base, f.One())
-	base = f.Mul(base, base)
-	for i := 1; i < n-1; i++ {
-		res = f.Select(expBts[i], f.Mul(base, res), res)
-		base = f.Mul(base, base)
+
+	// Pad to multiple of windowSize
+	padding := (windowSize - (n % windowSize)) % windowSize
+	paddedLen := n + padding
+
+	// Process windows from MSB to LSB
+	// expBts is LSB-first, so expBts[n-1] is MSB
+	numWindows := paddedLen / windowSize
+
+	// Initialize result with table lookup for the MSB window
+	// MSB window (window 0) covers bits [(numWindows-1)*windowSize, numWindows*windowSize-1]
+	// in the padded representation. Bits at indices >= n are padding zeros.
+	msbWindowBits := make([]frontend.Variable, windowSize)
+	msbBaseIdx := (numWindows - 1) * windowSize
+	for i := 0; i < windowSize; i++ {
+		actualIdx := msbBaseIdx + i
+		if actualIdx < n {
+			msbWindowBits[i] = expBts[actualIdx]
+		} else {
+			msbWindowBits[i] = 0
+		}
 	}
-	res = f.Select(expBts[n-1], f.Mul(base, res), res)
+	res := f.tableLookup(table, msbWindowBits)
+
+	// Process remaining windows
+	for w := 1; w < numWindows; w++ {
+		// Square windowSize times
+		for i := 0; i < windowSize; i++ {
+			res = f.Mul(res, res)
+		}
+
+		// Extract window bits for this window
+		// Window w covers bits from position (numWindows-1-w)*windowSize to (numWindows-w)*windowSize - 1
+		// In the original LSB-first array
+		windowBits := make([]frontend.Variable, windowSize)
+		baseIdx := (numWindows - 1 - w) * windowSize
+		for i := 0; i < windowSize; i++ {
+			windowBits[i] = expBts[baseIdx+i]
+		}
+
+		// Table lookup and multiply
+		selected := f.tableLookup(table, windowBits)
+		res = f.Mul(res, selected)
+	}
+
 	return res
 }
 
@@ -744,31 +911,27 @@ type multivariate[T FieldParams] struct {
 // are multiplied together and then summed together with the corresponding
 // coefficient.
 //
-// NB! This is experimental API. It does not support negative coefficients. It
-// does not check that computing the term wouldn't overflow the field.
+// NB! This is experimental API. It does not check that computing the term
+// wouldn't overflow the field.
 //
 // For example, for computing the expression x^2 + 2xy + y^2 we would call
 //
 //	f.Eval([][]*Element[T]{{x,x}, {x,y}, {y,y}}, []int{1, 2, 1})
 //
 // The method returns the result of the evaluation.
-//
-// To overcome the problem of not supporting negative coefficients, we can use a
-// constant non-native element -1 as one of the inputs.
 func (f *Field[T]) Eval(at [][]*Element[T], coefs []int) *Element[T] {
 	if len(at) != len(coefs) {
 		panic("terms and coefficients mismatch")
+	}
+	for _, c := range coefs {
+		if c == math.MinInt {
+			panic("coefficient math.MinInt overflows on negation")
+		}
 	}
 	// it is the obvious case - when we don't have any inputs then we need to
 	// evaluate the zero polynomial which is always zero.
 	if len(at) == 0 {
 		return f.Zero()
-	}
-	// omit the negative coefficients for now. We don't support it for now.
-	for i := range coefs {
-		if coefs[i] < 0 {
-			panic("negative coefficient")
-		}
 	}
 	// initialize the multivariate struct from the inputs. The current method
 	// takes as input references to the elements. However, the hint function
@@ -819,7 +982,7 @@ func (f *Field[T]) Eval(at [][]*Element[T], coefs []int) *Element[T] {
 
 	// we call the hint to compute the result. The hint returns the reduced
 	// result, the quotient and the carries.
-	k, r, c, err := f.callPolyMvHint(mv, allElems)
+	k, r, c, kNeg, err := f.callPolyMvHint(mv, allElems)
 	if err != nil {
 		panic(err)
 	}
@@ -834,9 +997,18 @@ func (f *Field[T]) Eval(at [][]*Element[T], coefs []int) *Element[T] {
 		r:    r,
 		k:    k,
 		c:    c,
+		kNeg: kNeg,
 	}
 
 	f.deferredChecks = append(f.deferredChecks, &mvc)
+
+	// Record operation for profiling
+	nbLimbs := 0
+	for i := range allElems {
+		nbLimbs += len(allElems[i].Limbs)
+	}
+	nbLimbs += len(r.Limbs) + len(k.Limbs) + len(c.Limbs)
+	profile.RecordOperation("emulated.Eval", nbLimbs)
 	return r
 }
 
@@ -844,7 +1016,7 @@ func (f *Field[T]) Eval(at [][]*Element[T], coefs []int) *Element[T] {
 // returns the remainder (reduced result), the quotient and the carries. The
 // computation is performed inside a hint, so it is the callers responsibility to
 // perform the deferred multiplication check.
-func (f *Field[T]) callPolyMvHint(mv *multivariate[T], at []*Element[T]) (quo, rem, carries *Element[T], err error) {
+func (f *Field[T]) callPolyMvHint(mv *multivariate[T], at []*Element[T]) (quo, rem, carries *Element[T], kNeg frontend.Variable, err error) {
 	// first compute the length of the result so that we know how many bits we need for the quotient.
 	nbLimbs, nbBits := f.fParams.NbLimbs(), f.fParams.BitsPerLimb()
 	modBits := uint(f.fParams.Modulus().BitLen())
@@ -856,21 +1028,33 @@ func (f *Field[T]) callPolyMvHint(mv *multivariate[T], at []*Element[T]) (quo, r
 	nbRemLimbs := nbLimbs
 	nbCarryLimbs := nbMultiplicationResLimbs(int(nbQuoLimbs), int(nbLimbs)) - 1
 
-	nbHintInputs := 7 + len(at)*len(mv.Terms) + len(mv.Coefficients) + len(f.Modulus().Limbs)
+	nbHintInputs := 6 + len(mv.Coefficients) + len(at)*len(mv.Terms) + len(mv.Coefficients) + len(f.Modulus().Limbs)
 	for i := range at {
 		nbHintInputs += len(at[i].Limbs) + 1
 	}
 	hintInputs := make([]frontend.Variable, 0, nbHintInputs)
 	hintInputs = append(hintInputs, nbBits, nbLimbs, len(mv.Terms), len(at), nbQuoLimbs, nbCarryLimbs)
+	// store per-coefficient signs: 0 = positive, 1 = negative
+	for _, c := range mv.Coefficients {
+		if c < 0 {
+			hintInputs = append(hintInputs, 1)
+		} else {
+			hintInputs = append(hintInputs, 0)
+		}
+	}
 	// store the terms in the hint input. First the exponents
 	for i := range mv.Terms {
 		for j := range mv.Terms[i] {
 			hintInputs = append(hintInputs, mv.Terms[i][j])
 		}
 	}
-	// and now the coefficients
+	// and now the coefficients (absolute values)
 	for i := range mv.Coefficients {
-		hintInputs = append(hintInputs, mv.Coefficients[i])
+		c := mv.Coefficients[i]
+		if c < 0 {
+			c = -c
+		}
+		hintInputs = append(hintInputs, c)
 	}
 	// finally, we store the modulus and all the inputs
 	hintInputs = append(hintInputs, f.Modulus().Limbs...)
@@ -880,15 +1064,18 @@ func (f *Field[T]) callPolyMvHint(mv *multivariate[T], at []*Element[T]) (quo, r
 		hintInputs = append(hintInputs, len(at[i].Limbs))
 		hintInputs = append(hintInputs, at[i].Limbs...)
 	}
-	ret, err := f.api.NewHint(polyMvHint, int(nbQuoLimbs)+int(nbRemLimbs)+int(nbCarryLimbs), hintInputs...)
+	nbOutputs := int(nbQuoLimbs) + int(nbRemLimbs) + int(nbCarryLimbs) + 1
+	ret, err := f.api.NewHint(polyMvHint, nbOutputs, hintInputs...)
 	if err != nil {
 		err = fmt.Errorf("call hint: %w", err)
 		return
 	}
 	quo = f.packLimbs(ret[:nbQuoLimbs], false)
 	rem = f.packLimbs(ret[nbQuoLimbs:nbQuoLimbs+nbRemLimbs], true)
-	carries = f.newInternalElement(ret[nbQuoLimbs+nbRemLimbs:], 0)
-	return quo, rem, carries, nil
+	carries = f.newInternalElement(ret[nbQuoLimbs+nbRemLimbs:nbQuoLimbs+nbRemLimbs+uint(nbCarryLimbs)], 0)
+	kNeg = ret[nbQuoLimbs+nbRemLimbs+uint(nbCarryLimbs)]
+	f.api.AssertIsBoolean(kNeg)
+	return quo, rem, carries, kNeg, nil
 }
 
 // mvCheck is a deferred check for multivariate polynomial evaluation. It
@@ -899,13 +1086,14 @@ type mvCheck[T FieldParams] struct {
 	f    *Field[T]
 	mv   *multivariate[T]
 	vals []*Element[T]
-	r    *Element[T] // reduced result
-	k    *Element[T] // quotient
-	c    *Element[T] // carry
+	r    *Element[T]       // reduced result
+	k    *Element[T]       // quotient (absolute value)
+	c    *Element[T]       // carry
+	kNeg frontend.Variable // 1 if quotient is negative, 0 otherwise
 }
 
 func (mc *mvCheck[T]) toCommit() []frontend.Variable {
-	nbToCommit := len(mc.r.Limbs) + len(mc.k.Limbs) + len(mc.c.Limbs)
+	nbToCommit := len(mc.r.Limbs) + len(mc.k.Limbs) + len(mc.c.Limbs) + 1
 	for j := range mc.vals {
 		nbToCommit += len(mc.vals[j].Limbs)
 	}
@@ -913,6 +1101,7 @@ func (mc *mvCheck[T]) toCommit() []frontend.Variable {
 	toCommit = append(toCommit, mc.r.Limbs...)
 	toCommit = append(toCommit, mc.k.Limbs...)
 	toCommit = append(toCommit, mc.c.Limbs...)
+	toCommit = append(toCommit, mc.kNeg)
 	for j := range mc.vals {
 		toCommit = append(toCommit, mc.vals[j].Limbs...)
 	}
@@ -948,6 +1137,13 @@ func (mc *mvCheck[T]) check(api frontend.API, peval, coef frontend.Variable) {
 	// we either have to perform the equality check in the native field or in
 	// the extension field. It was already determined at the [Field]
 	// initialization time which kind of check needs to be done.
+	//
+	// The hint returns |k| and a boolean kNeg ∈ {0,1} indicating whether the
+	// quotient is negative. We define the sign factor s = 1 - 2·kNeg which
+	// maps kNeg=0 → s=1 (positive quotient) and kNeg=1 → s=-1 (negative
+	// quotient). The checked equation is then:
+	//
+	//   lhs(ch) = r(ch) + s·|k(ch)|·p(ch) + (2^t - ch)·c(ch)
 	if mc.f.extensionApi == nil {
 		ls := frontend.Variable(0)
 		for i, term := range mc.mv.Terms {
@@ -959,7 +1155,9 @@ func (mc *mvCheck[T]) check(api frontend.API, peval, coef frontend.Variable) {
 			}
 			ls = api.Add(ls, termProd)
 		}
-		rs := api.Add(mc.r.evaluation, api.Mul(peval, mc.k.evaluation), api.Mul(mc.c.evaluation, coef))
+		kp := api.Mul(mc.k.evaluation, peval)
+		s := api.Sub(1, api.Mul(2, mc.kNeg))
+		rs := api.Add(mc.r.evaluation, api.Mul(s, kp), api.Mul(mc.c.evaluation, coef))
 		api.AssertIsEqual(ls, rs)
 	} else {
 		// here we use the fact that [frontend.Variable] is defined as any, but
@@ -985,10 +1183,11 @@ func (mc *mvCheck[T]) check(api frontend.API, peval, coef frontend.Variable) {
 		cext := mc.c.evaluation.(fieldextension.Element)
 		coefext := coef.(fieldextension.Element)
 
-		pkext := mc.f.extensionApi.Mul(pevalext, kext)
-		ccoefext := mc.f.extensionApi.Mul(coefext, cext)
+		kpext := mc.f.extensionApi.Mul(pevalext, kext)
+		sext := mc.f.extensionApi.AsExtensionVariable(api.Sub(1, api.Mul(2, mc.kNeg)))
 
-		rs := mc.f.extensionApi.Add(rext, pkext)
+		ccoefext := mc.f.extensionApi.Mul(coefext, cext)
+		rs := mc.f.extensionApi.Add(rext, mc.f.extensionApi.Mul(sext, kpext))
 		rs = mc.f.extensionApi.Add(rs, ccoefext)
 
 		mc.f.extensionApi.AssertIsEqual(ls, rs)
@@ -1015,6 +1214,9 @@ func (mc *mvCheck[T]) cleanEvaluations() {
 // As it only depends on the bit-length of the inputs, then we can precompute it
 // regardless of the actual values.
 func (f *Field[T]) polyMvEvalQuoSize(mv *multivariate[T], at []*Element[T]) (quoSize uint) {
+	if len(mv.Terms) == 0 {
+		return 0
+	}
 	quoSizes := make([]uint, len(mv.Terms))
 	for i, term := range mv.Terms {
 		// for every term, the result length is the sum of the lengths of the
@@ -1025,7 +1227,11 @@ func (f *Field[T]) polyMvEvalQuoSize(mv *multivariate[T], at []*Element[T]) (quo
 				lengths = append(lengths, uint(len(at[j].Limbs))*f.fParams.BitsPerLimb()+at[j].overflow)
 			}
 		}
-		lengths = append(lengths, uint(bits.Len(uint(mv.Coefficients[i]))))
+		coef := mv.Coefficients[i]
+		if coef < 0 {
+			coef = -coef
+		}
+		lengths = append(lengths, uint(bits.Len(uint(coef))))
 		if lengthSum := sum(lengths...); lengthSum > 0 {
 			// in edge case when inputs are zeros and coefficient is zero, we
 			// would have a underflow otherwise.
@@ -1034,7 +1240,7 @@ func (f *Field[T]) polyMvEvalQuoSize(mv *multivariate[T], at []*Element[T]) (quo
 	}
 	// and for the full result, it is maximum of the inputs. We also add a bit
 	// for every term for overflow.
-	quoSize = max(quoSizes...) + uint(len(quoSizes))
+	quoSize = slices.Max(quoSizes) + uint(len(quoSizes))
 	return quoSize
 }
 
@@ -1054,7 +1260,7 @@ func polyMvHint(mod *big.Int, inputs, outputs []*big.Int) error {
 		nbRemLimbs   = nbLimbs
 		nbCarryLimbs = int(inputs[5].Int64())
 	)
-	if len(outputs) != nbQuoLimbs+nbRemLimbs+nbCarryLimbs {
+	if len(outputs) != nbQuoLimbs+nbRemLimbs+nbCarryLimbs+1 {
 		return errors.New("output length mismatch")
 	}
 	outPtr := 0
@@ -1063,8 +1269,16 @@ func polyMvHint(mod *big.Int, inputs, outputs []*big.Int) error {
 	remLimbs := outputs[outPtr : outPtr+nbRemLimbs]
 	outPtr += nbRemLimbs
 	carryLimbs := outputs[outPtr : outPtr+nbCarryLimbs]
-	terms := make([][]int, nbTerms)
+	outPtr += nbCarryLimbs
+	kNegOut := outputs[outPtr]
+	// read per-coefficient signs: 0 = positive, 1 = negative
 	ptr := 6
+	signs := make([]int, nbTerms)
+	for i := range signs {
+		signs[i] = int(inputs[ptr].Int64())
+		ptr++
+	}
+	terms := make([][]int, nbTerms)
 	// read the terms
 	for i := range terms {
 		terms[i] = make([]int, nbVars)
@@ -1073,7 +1287,7 @@ func polyMvHint(mod *big.Int, inputs, outputs []*big.Int) error {
 			ptr++
 		}
 	}
-	// read the coefficients
+	// read the coefficients (absolute values from hint inputs)
 	coeffs := make([]*big.Int, nbTerms)
 	for i := range coeffs {
 		coeffs[i] = inputs[ptr]
@@ -1082,7 +1296,8 @@ func polyMvHint(mod *big.Int, inputs, outputs []*big.Int) error {
 	// read the modulus
 	plimbs := inputs[ptr : ptr+nbLimbs]
 	ptr += nbLimbs
-	p := new(big.Int)
+	p := bigIntPool.Get().(*big.Int)
+	defer bigIntPool.Put(p)
 	if err := limbs.Recompose(plimbs, uint(nbBits), p); err != nil {
 		return fmt.Errorf("recompose p: %w", err)
 	}
@@ -1102,32 +1317,52 @@ func polyMvHint(mod *big.Int, inputs, outputs []*big.Int) error {
 	// recompose the inputs in limb-form to *big.Int form
 	vars := make([]*big.Int, nbVars)
 	for i := range vars {
-		vars[i] = new(big.Int)
+		vars[i] = bigIntPool.Get().(*big.Int)
+		defer bigIntPool.Put(vars[i]) // recall defer is function level, not scope level
 		if err := limbs.Recompose(varsLimbs[i], uint(nbBits), vars[i]); err != nil {
 			return fmt.Errorf("recompose vars[%d]: %w", i, err)
 		}
 	}
 
 	// compute the result on full inputs
-	fullLhs := new(big.Int)
+	fullLhs := bigIntPool.Get().(*big.Int)
+	defer bigIntPool.Put(fullLhs)
+	fullLhs.SetInt64(0)
+	termRes := bigIntPool.Get().(*big.Int)
+	defer bigIntPool.Put(termRes)
 	for i, term := range terms {
-		termRes := new(big.Int).Set(coeffs[i])
+		termRes.Set(coeffs[i])
 		for i, pow := range term {
 			for j := 0; j < pow; j++ {
 				termRes.Mul(termRes, vars[i])
 			}
 		}
-		fullLhs.Add(fullLhs, termRes)
+		if signs[i] != 0 {
+			fullLhs.Sub(fullLhs, termRes)
+		} else {
+			fullLhs.Add(fullLhs, termRes)
+		}
 	}
 
-	// compute the result as r + k*p for now
+	// compute the result as r + k*p using Euclidean division (r >= 0)
 	var (
-		quo = new(big.Int)
-		rem = new(big.Int)
+		quo = bigIntPool.Get().(*big.Int)
+		rem = bigIntPool.Get().(*big.Int)
 	)
-	if p.Cmp(new(big.Int)) != 0 {
-		quo.QuoRem(fullLhs, p, rem)
+	defer bigIntPool.Put(rem)
+	defer bigIntPool.Put(quo)
+	quo.SetInt64(0)
+	rem.SetInt64(0)
+	if p.Sign() != 0 {
+		quo.DivMod(fullLhs, p, rem)
 	}
+	// if quotient is negative, output |k| and set kNeg = 1
+	var kNegVal int
+	if quo.Sign() < 0 {
+		kNegVal = 1
+		quo.Neg(quo)
+	}
+	kNegOut.SetInt64(int64(kNegVal))
 	// write the remainder and quotient to output
 	if err := limbs.Decompose(quo, uint(nbBits), quoLimbs); err != nil {
 		return fmt.Errorf("decompose quo: %w", err)
@@ -1137,7 +1372,8 @@ func polyMvHint(mod *big.Int, inputs, outputs []*big.Int) error {
 	}
 
 	// compute the result on limbs
-	tmp := new(big.Int)
+	tmp := bigIntPool.Get().(*big.Int)
+	defer bigIntPool.Put(tmp)
 	var lhs []*big.Int
 	for i, term := range terms {
 		// collect the variables to be multiplied together
@@ -1150,45 +1386,65 @@ func polyMvHint(mod *big.Int, inputs, outputs []*big.Int) error {
 		if len(termVarLimbs) == 0 {
 			continue
 		}
-		termRes := []*big.Int{new(big.Int).Set(coeffs[i])}
+		termRes := []*big.Int{bigIntPool.Get().(*big.Int).Set(coeffs[i])}
+		defer bigIntPool.Put(termRes[0])
 		// perform limbwise multiplication
 		for _, toMul := range termVarLimbs {
 			termRes = limbMul(termRes, toMul)
 		}
 		// add current term to the result. Increase the length of necessary when
 		// required.
-		for i := len(lhs); i < len(termRes); i++ {
-			lhs = append(lhs, new(big.Int))
+		for j := len(lhs); j < len(termRes); j++ {
+			sfx := bigIntPool.Get().(*big.Int)
+			defer bigIntPool.Put(sfx)
+			sfx.SetInt64(0)
+			lhs = append(lhs, sfx)
 		}
-		for i := range termRes {
-			lhs[i].Add(lhs[i], termRes[i])
+		if signs[i] != 0 {
+			for j := range termRes {
+				lhs[j].Sub(lhs[j], termRes[j])
+			}
+		} else {
+			for j := range termRes {
+				lhs[j].Add(lhs[j], termRes[j])
+			}
 		}
 	}
 
-	// compute the result as r + k*p on limbs
-	rhs := make([]*big.Int, max(nbLimbs, nbMultiplicationResLimbs(nbQuoLimbs, nbLimbs)))
-	for i := range rhs {
-		rhs[i] = new(big.Int)
+	// compute k*p on limbs
+	kpLimbs := make([]*big.Int, max(1, nbMultiplicationResLimbs(nbQuoLimbs, nbLimbs)))
+	for i := range kpLimbs {
+		kpLimbs[i] = bigIntPool.Get().(*big.Int)
+		defer bigIntPool.Put(kpLimbs[i])
+		kpLimbs[i].SetInt64(0)
 	}
 	for i := 0; i < nbLimbs; i++ {
-		rhs[i].Add(rhs[i], remLimbs[i])
 		for j := 0; j < nbQuoLimbs; j++ {
 			tmp.Mul(quoLimbs[j], plimbs[i])
-			rhs[i+j].Add(rhs[i+j], tmp)
+			kpLimbs[i+j].Add(kpLimbs[i+j], tmp)
 		}
 	}
 
 	// compute the carries
-	carry := new(big.Int)
+	carry := bigIntPool.Get().(*big.Int)
+	defer bigIntPool.Put(carry)
+	carry.SetInt64(0)
 	for i := range carryLimbs {
 		if i < len(lhs) {
 			carry.Add(carry, lhs[i])
 		}
-		if i < len(rhs) {
-			carry.Sub(carry, rhs[i])
+		if i < nbRemLimbs {
+			carry.Sub(carry, remLimbs[i])
+		}
+		if i < len(kpLimbs) {
+			if kNegVal == 0 {
+				carry.Sub(carry, kpLimbs[i])
+			} else {
+				carry.Add(carry, kpLimbs[i])
+			}
 		}
 		carry.Rsh(carry, uint(nbBits))
-		carryLimbs[i] = new(big.Int).Set(carry)
+		carryLimbs[i].Set(carry)
 	}
 
 	return nil

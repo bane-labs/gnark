@@ -15,8 +15,6 @@ import (
 
 	"github.com/bits-and-blooms/bitset"
 	"github.com/consensys/gnark/constraint"
-	"github.com/consensys/gnark/internal/gkr/gkrinfo"
-
 	"github.com/consensys/gnark/constraint/solver"
 	"github.com/consensys/gnark/debug"
 	"github.com/consensys/gnark/frontend/schema"
@@ -40,13 +38,14 @@ import (
 // it converts the inputs to the API to big.Int (after a mod reduce using the curve base field)
 type engine struct {
 	curveID ecc.ID
-	q       *big.Int
+	q       *big.Int // field modulus
 	// mHintsFunctions map[hint.ID]hintFunction
 	constVars bool
 	kvstore.Store
 	blueprints                []constraint.Blueprint
 	internalVariables         []*big.Int
 	noSmallFieldCompatibility bool
+	hintMapping               map[solver.HintID]solver.Hint
 }
 
 // TestEngineOption defines an option for the test engine.
@@ -73,6 +72,20 @@ func SetAllVariablesAsConstants() TestEngineOption {
 func WithNoSmallFieldCompatibility() TestEngineOption {
 	return func(e *engine) error {
 		e.noSmallFieldCompatibility = true
+		return nil
+	}
+}
+
+// WithReplacementHint allows to replace a hint function in the test engine with
+// a custom one, for a given hint ID. This is useful for testing edge cases,
+// such as when the hint function returns incorrect values.
+func WithReplacementHint(id solver.HintID, f solver.Hint) TestEngineOption {
+	return func(e *engine) error {
+		if e.hintMapping == nil {
+			e.hintMapping = make(map[solver.HintID]solver.Hint)
+		}
+		// Later calls override earlier ones for the same hint ID, matching solver.OverrideHint behavior.
+		e.hintMapping[id] = f
 		return nil
 	}
 }
@@ -118,18 +131,6 @@ func IsSolved(circuit, witness frontend.Circuit, field *big.Int, opts ...TestEng
 	log.Debug().Msg("running circuit in test engine")
 	cptAdd, cptMul, cptSub, cptToBinary, cptFromBinary, cptAssertIsEqual = 0, 0, 0, 0, 0, 0
 
-	// XXX(@ivokub): commented out - this seems to match the implementation of native solver,
-	// but we always create new test engine when calling `IsSolved`, so this slice is always empty.
-	// Skipping this allows us to avoid making test engine generic.
-	/*
-		// first we reset the stateful blueprints
-		for i := range e.blueprints {
-			if b, ok := e.blueprints[i].(constraint.BlueprintStateful); ok {
-				b.Reset()
-			}
-		}
-	*/
-
 	var apiEngine frontend.API
 	if smallfields.IsSmallField(e.modulus()) && !e.noSmallFieldCompatibility {
 		apiEngine = &smallfieldEngine{engine: e}
@@ -155,8 +156,15 @@ func IsSolved(circuit, witness frontend.Circuit, field *big.Int, opts ...TestEng
 }
 
 func callDeferred(builder frontend.API) error {
-	for i := 0; i < len(circuitdefer.GetAll[func(frontend.API) error](builder)); i++ {
-		if err := circuitdefer.GetAll[func(frontend.API) error](builder)[i](builder); err != nil {
+	// we get the compiler from the builder in case builder is already wrapped
+	// and overwrites methods required in kvstore.Store (SetKeyValue and
+	// GetKeyValue).
+	//
+	// However, as an API to the callbacks we still pass in the initial builder
+	// as deferred methods may use wrapped methods (Commit, WideCommit).
+	compiler := builder.Compiler()
+	for i := 0; i < len(circuitdefer.GetAll[func(frontend.API) error](compiler)); i++ {
+		if err := circuitdefer.GetAll[func(frontend.API) error](compiler)[i](builder); err != nil {
 			return fmt.Errorf("defer fn %d: %w", i, err)
 		}
 	}
@@ -243,8 +251,8 @@ func (e *engine) Div(i1, i2 frontend.Variable) frontend.Variable {
 func (e *engine) DivUnchecked(i1, i2 frontend.Variable) frontend.Variable {
 	res := new(big.Int)
 	b1, b2 := e.toBigInt(i1), e.toBigInt(i2)
-	if b1.IsUint64() && b2.IsUint64() && b1.Uint64() == 0 && b2.Uint64() == 0 {
-		return 0
+	if b1.Sign() == 0 && b2.Sign() == 0 {
+		panic("DivUnchecked(0, 0) called: this leads to an unconstrained value in circuits and is unsupported in the test engine")
 	}
 	if res.ModInverse(b2, e.modulus()) == nil {
 		panic("no inverse")
@@ -534,6 +542,12 @@ func (e *engine) NewHint(f solver.Hint, nbOutputs int, inputs ...frontend.Variab
 	if nbOutputs <= 0 {
 		return nil, fmt.Errorf("hint function must return at least one output")
 	}
+	hintFn := f
+	if e.hintMapping != nil {
+		if mappedFn, exists := e.hintMapping[solver.GetHintID(f)]; exists {
+			hintFn = mappedFn
+		}
+	}
 
 	in := make([]*big.Int, len(inputs))
 
@@ -545,7 +559,7 @@ func (e *engine) NewHint(f solver.Hint, nbOutputs int, inputs ...frontend.Variab
 		res[i] = new(big.Int)
 	}
 
-	err := f(e.Field(), in, res)
+	err := hintFn(e.Field(), in, res)
 
 	if err != nil {
 		panic("NewHint: " + err.Error())
@@ -704,6 +718,8 @@ func (e *engine) Commit(v ...frontend.Variable) (frontend.Variable, error) {
 }
 
 func (e *engine) Defer(cb func(frontend.API) error) {
+	// here we can use *engine as the type implementing frontend.API as test engine
+	// is initialized in IsSolved and we know keystore isn't wrapped.
 	circuitdefer.Put(e, cb)
 }
 
@@ -728,7 +744,8 @@ func addInstructionGeneric[E constraint.Element](e *engine, bID constraint.Bluep
 	// solve the blueprint synchronously
 	s := blueprintSolver[E]{
 		internalVariables: e.internalVariables,
-		q:                 e.q,
+		blueprints:        e.blueprints,
+		modulus:           newModulus[E](e.q),
 	}
 	if err := blueprint.Solve(&s, inst); err != nil {
 		panic(err)
@@ -761,7 +778,16 @@ func (e *engine) AddBlueprint(b constraint.Blueprint) constraint.BlueprintID {
 			panic("unsupported blueprint in test engine")
 		}
 	}
+
 	e.blueprints = append(e.blueprints, b)
+
+	if stateful, ok := b.(constraint.BlueprintStateful[constraint.U32]); ok {
+		stateful.Reset()
+	}
+	if stateful, ok := b.(constraint.BlueprintStateful[constraint.U64]); ok {
+		stateful.Reset()
+	}
+
 	return constraint.BlueprintID(len(e.blueprints) - 1)
 }
 
@@ -779,11 +805,10 @@ func (e *engine) InternalVariable(vID uint32) frontend.Variable {
 // this is used in custom blueprints to return a variable than can be encoded in blueprints
 func (e *engine) ToCanonicalVariable(v frontend.Variable) frontend.CanonicalVariable {
 	r := e.toBigInt(v)
-	return wrappedBigInt{Int: r, modulus: e.q}
-}
-
-func (e *engine) SetGkrInfo(gkrinfo.StoringInfo) error {
-	return nil
+	if smallfields.IsSmallField(e.q) {
+		return wrappedBigInt[constraint.U32]{Int: r, modulus: newModulus[constraint.U32](e.q)}
+	}
+	return wrappedBigInt[constraint.U64]{Int: r, modulus: newModulus[constraint.U64](e.q)}
 }
 
 // MustBeLessOrEqCst implements method comparing value given by its bits aBits
@@ -838,8 +863,4 @@ func (e *smallfieldEngine) Check(in frontend.Variable, width int) {
 	if bin.BitLen() > width {
 		panic(fmt.Sprintf("range check failed: %s (bitLen == %d) with %d bits", bin.String(), bin.BitLen(), width))
 	}
-}
-
-func (e *smallfieldEngine) Compiler() frontend.Compiler {
-	return e
 }

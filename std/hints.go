@@ -7,16 +7,16 @@ import (
 	"github.com/consensys/gnark/std/algebra/emulated/fields_bls12381"
 	"github.com/consensys/gnark/std/algebra/emulated/fields_bn254"
 	"github.com/consensys/gnark/std/algebra/emulated/fields_bw6761"
+	"github.com/consensys/gnark/std/algebra/emulated/sw_bls12381"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_bw6761"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
 	"github.com/consensys/gnark/std/algebra/native/fields_bls12377"
-	"github.com/consensys/gnark/std/algebra/native/fields_bls24315"
 	"github.com/consensys/gnark/std/algebra/native/sw_bls12377"
-	"github.com/consensys/gnark/std/algebra/native/sw_bls24315"
 	"github.com/consensys/gnark/std/algebra/native/twistededwards"
 	"github.com/consensys/gnark/std/conversion"
 	"github.com/consensys/gnark/std/evmprecompiles"
 	"github.com/consensys/gnark/std/hash/sha3"
+	"github.com/consensys/gnark/std/internal/fieldextension"
 	"github.com/consensys/gnark/std/internal/logderivarg"
 	"github.com/consensys/gnark/std/math/bits"
 	"github.com/consensys/gnark/std/math/bitslice"
@@ -56,14 +56,15 @@ func registerHints() {
 	solver.RegisterHint(fields_bw6761.GetHints()...)
 	// native fields
 	solver.RegisterHint(fields_bls12377.GetHints()...)
-	solver.RegisterHint(fields_bls24315.GetHints()...)
 	solver.RegisterHint(twistededwards.GetHints()...)
 	// emulated curves
 	solver.RegisterHint(sw_emulated.GetHints()...)
+	solver.RegisterHint(sw_bls12381.GetHints()...)
 	solver.RegisterHint(sw_bw6761.GetHints()...)
 	// native curves
 	solver.RegisterHint(sw_bls12377.GetHints()...)
-	solver.RegisterHint(sw_bls24315.GetHints()...)
+	// field extensions
+	solver.RegisterHint(fieldextension.GetHints()...)
 }
 
 func init() {

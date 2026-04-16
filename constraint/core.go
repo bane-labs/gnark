@@ -11,7 +11,6 @@ import (
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/constraint/solver"
 	"github.com/consensys/gnark/debug"
-	"github.com/consensys/gnark/internal/gkr/gkrinfo"
 	"github.com/consensys/gnark/internal/smallfields"
 	"github.com/consensys/gnark/internal/utils"
 	"github.com/consensys/gnark/logger"
@@ -93,7 +92,7 @@ type System struct {
 	NbInternalVariables int
 
 	// input wires names
-	Public, Secret []string
+	Public, Secret []string //nolint:gosec // They are wire names, not secret values
 
 	// logs (added with system.Println, resolved when solver sets a value to a wire)
 	Logs []LogEntry
@@ -125,7 +124,6 @@ type System struct {
 	lbWireLevel []Level `cbor:"-"` // at which level we solve a wire. init at -1.
 
 	CommitmentInfo Commitments
-	GkrInfo        gkrinfo.StoringInfo
 
 	genericHint BlueprintID
 }
@@ -180,7 +178,7 @@ func (system *System) GetNbInternalVariables() int {
 
 // CheckSerializationHeader parses the scalar field and gnark version headers
 //
-// This is meant to be use at the deserialization step, and will error for illegal values
+// This is meant to be used at the deserialization step, and will error for illegal values
 func (system *System) CheckSerializationHeader() error {
 	// check gnark version
 	binaryVersion := gnark.Version
@@ -469,13 +467,4 @@ func putBuffer(buf *[]uint32) {
 		panic("invalid entry in putBuffer")
 	}
 	bufPool.Put(buf)
-}
-
-func (system *System) AddGkr(gkrInfo gkrinfo.StoringInfo) error {
-	if system.GkrInfo.Is() {
-		return fmt.Errorf("currently only one GKR sub-circuit per SNARK is supported")
-	}
-
-	system.GkrInfo = gkrInfo
-	return nil
 }

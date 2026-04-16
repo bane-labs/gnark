@@ -4,13 +4,19 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash"
+	"os"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend"
+	"github.com/consensys/gnark/backend/groth16"
+	"github.com/consensys/gnark/backend/plonk"
 	"github.com/consensys/gnark/backend/solidity"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/frontend/cs/r1cs"
+	"github.com/consensys/gnark/frontend/cs/scs"
 	"github.com/consensys/gnark/test"
+	"github.com/consensys/gnark/test/unsafekzg"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -66,13 +72,25 @@ func (c *twoCommitCircuit) Define(api frontend.API) error {
 	return nil
 }
 
+// curveShortName returns a short filesystem-friendly name for the curve.
+func curveShortName(id ecc.ID) string {
+	switch id {
+	case ecc.BN254:
+		return "bn254"
+	case ecc.BLS12_381:
+		return "bls12381"
+	default:
+		panic("unsupported curve: " + id.String())
+	}
+}
+
 func TestNoCommitment(t *testing.T) {
 	// should succeed both with G16 and PLONK:
 	assert := test.NewAssert(t)
 	circuit := &noCommitCircuit{}
 	assignment := &noCommitCircuit{A: 2, B: 3, Out: 6}
 	defaultOpts := []test.TestingOption{
-		test.WithCurves(ecc.BN254),
+		test.WithCurves(ecc.BN254, ecc.BLS12_381),
 		test.WithValidAssignment(assignment),
 	}
 	checkCircuit := func(assert *test.Assert, bid backend.ID) {
@@ -98,7 +116,7 @@ func TestSingleCommitment(t *testing.T) {
 	circuit := &commitCircuit{}
 	assignment := &commitCircuit{A: 2, B: 3, Out: 6}
 	defaultOpts := []test.TestingOption{
-		test.WithCurves(ecc.BN254),
+		test.WithCurves(ecc.BN254, ecc.BLS12_381),
 		test.WithValidAssignment(assignment),
 	}
 	checkCircuit := func(assert *test.Assert, bid backend.ID, newHash func() hash.Hash) {
@@ -172,5 +190,99 @@ func TestTwoCommitments(t *testing.T) {
 	assert := test.NewAssert(t)
 	circuit := &twoCommitCircuit{}
 	assignment := &twoCommitCircuit{A: 2, B: 3, Out: 6}
-	assert.CheckCircuit(circuit, test.WithCurves(ecc.BN254), test.WithValidAssignment(assignment), test.WithBackends(backend.PLONK))
+	assert.CheckCircuit(circuit, test.WithCurves(ecc.BN254, ecc.BLS12_381), test.WithValidAssignment(assignment), test.WithBackends(backend.PLONK))
+}
+
+// loadOrSetupGroth16VK loads an existing VK from vkPath, or if the file doesn't
+// exist, compiles the circuit, runs setup, and writes the new VK to vkPath.
+func loadOrSetupGroth16VK(assert *test.Assert, id ecc.ID, circuit frontend.Circuit, vkPath string) groth16.VerifyingKey {
+	if _, err := os.Stat(vkPath); err == nil {
+		vk := groth16.NewVerifyingKey(id)
+		vkf, err := os.Open(vkPath)
+		assert.NoError(err)
+		defer vkf.Close()
+		_, err = vk.ReadFrom(vkf)
+		assert.NoError(err)
+		return vk
+	}
+	ccs, err := frontend.Compile(id.ScalarField(), r1cs.NewBuilder, circuit)
+	assert.NoError(err)
+	_, vk, err := groth16.Setup(ccs)
+	assert.NoError(err)
+	vkf, err := os.Create(vkPath)
+	assert.NoError(err)
+	defer vkf.Close()
+	_, err = vk.WriteTo(vkf)
+	assert.NoError(err)
+	return vk
+}
+
+func TestWriteContractsGroth16(t *testing.T) {
+	t.Skip("temporary test to write out existing contracts")
+	assert := test.NewAssert(t)
+	for _, curve := range []ecc.ID{ecc.BN254, ecc.BLS12_381} {
+		cn := curveShortName(curve)
+		// groth16 no commitment
+		vk := loadOrSetupGroth16VK(assert, curve, &noCommitCircuit{}, "testdata/blank_groth16_"+cn+"_nocommit.vk")
+		solf, err := os.Create("testdata/blank_groth16_" + cn + "_nocommit.sol")
+		assert.NoError(err)
+		err = vk.ExportSolidity(solf)
+		solf.Close()
+		assert.NoError(err)
+		// groth16 single commitment
+		vk = loadOrSetupGroth16VK(assert, curve, &commitCircuit{}, "testdata/blank_groth16_"+cn+"_commit.vk")
+		solf, err = os.Create("testdata/blank_groth16_" + cn + "_commit.sol")
+		assert.NoError(err)
+		err = vk.ExportSolidity(solf, solidity.WithHashToFieldFunction(sha3.NewLegacyKeccak256()))
+		solf.Close()
+		assert.NoError(err)
+	}
+}
+
+// loadOrSetupPlonkVK loads an existing VK from vkPath, or if the file doesn't
+// exist, compiles the circuit, runs setup, and writes the new VK to vkPath.
+func loadOrSetupPlonkVK(assert *test.Assert, id ecc.ID, circuit frontend.Circuit, vkPath string) plonk.VerifyingKey {
+	if _, err := os.Stat(vkPath); err == nil {
+		vk := plonk.NewVerifyingKey(id)
+		vkf, err := os.Open(vkPath)
+		assert.NoError(err)
+		defer vkf.Close()
+		_, err = vk.ReadFrom(vkf)
+		assert.NoError(err)
+		return vk
+	}
+	ccs, err := frontend.Compile(id.ScalarField(), scs.NewBuilder, circuit)
+	assert.NoError(err)
+	srs, srsLagrange, err := unsafekzg.NewSRS(ccs)
+	assert.NoError(err)
+	_, vk, err := plonk.Setup(ccs, srs, srsLagrange)
+	assert.NoError(err)
+	vkf, err := os.Create(vkPath)
+	assert.NoError(err)
+	defer vkf.Close()
+	_, err = vk.WriteTo(vkf)
+	assert.NoError(err)
+	return vk
+}
+
+func TestWriteContractsPlonk(t *testing.T) {
+	t.Skip("temporary test to write out existing contracts")
+	assert := test.NewAssert(t)
+	for _, curve := range []ecc.ID{ecc.BN254, ecc.BLS12_381} {
+		cn := curveShortName(curve)
+		// plonk no commitment
+		vk := loadOrSetupPlonkVK(assert, curve, &noCommitCircuit{}, "testdata/blank_plonk_"+cn+"_nocommit.vk")
+		solf, err := os.Create("testdata/blank_plonk_" + cn + "_nocommit.sol")
+		assert.NoError(err)
+		err = vk.ExportSolidity(solf)
+		solf.Close()
+		assert.NoError(err)
+		// plonk single commitment
+		vk = loadOrSetupPlonkVK(assert, curve, &commitCircuit{}, "testdata/blank_plonk_"+cn+"_commit.vk")
+		solf, err = os.Create("testdata/blank_plonk_" + cn + "_commit.sol")
+		assert.NoError(err)
+		err = vk.ExportSolidity(solf)
+		solf.Close()
+		assert.NoError(err)
+	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2020-2025 Consensys Software Inc.
+// Copyright 2020-2026 Consensys Software Inc.
 // Licensed under the Apache License, Version 2.0. See the LICENSE file for details.
 
 package fields_bls12377
@@ -517,4 +517,12 @@ func (e *E12) Assign(a *bls12377.E12) {
 func (e *E12) AssertIsEqual(api frontend.API, other E12) {
 	e.C0.AssertIsEqual(api, other.C0)
 	e.C1.AssertIsEqual(api, other.C1)
+}
+
+// IsEqual returns a variable that is 1 if self == other, 0 otherwise
+func (e *E12) IsEqual(api frontend.API, other E12) frontend.Variable {
+	return api.And(
+		e.C0.IsEqual(api, other.C0),
+		e.C1.IsEqual(api, other.C1),
+	)
 }

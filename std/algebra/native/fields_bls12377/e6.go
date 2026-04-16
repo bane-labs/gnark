@@ -1,4 +1,4 @@
-// Copyright 2020-2025 Consensys Software Inc.
+// Copyright 2020-2026 Consensys Software Inc.
 // Licensed under the Apache License, Version 2.0. See the LICENSE file for details.
 
 package fields_bls12377
@@ -88,7 +88,7 @@ func (e *E6) Neg(api frontend.API, e1 E6) *E6 {
 
 // Mul multiplies two E6 elmts
 func (e *E6) Mul(api frontend.API, e1, e2 E6) *E6 {
-	if ft, ok := api.(frontendtype.FrontendTyper); ok {
+	if ft, ok := api.Compiler().(frontendtype.FrontendTyper); ok {
 		switch ft.FrontendType() {
 		case frontendtype.R1CS:
 			return e.mulToom3OverKaratsuba(api, e1, e2)
@@ -343,6 +343,17 @@ func (e *E6) AssertIsEqual(api frontend.API, other E6) {
 	e.B0.AssertIsEqual(api, other.B0)
 	e.B1.AssertIsEqual(api, other.B1)
 	e.B2.AssertIsEqual(api, other.B2)
+}
+
+// IsEqual returns 1 if e is equal to other, 0 otherwise
+func (e *E6) IsEqual(api frontend.API, other E6) frontend.Variable {
+	b0Equal := e.B0.IsEqual(api, other.B0)
+	b1Equal := e.B1.IsEqual(api, other.B1)
+	b2Equal := e.B2.IsEqual(api, other.B2)
+	// inputs are already boolean, so multiplication suffices.
+	isEqual := api.Mul(b0Equal, b1Equal, b2Equal)
+	api.Compiler().MarkBoolean(isEqual)
+	return isEqual
 }
 
 // MulByE2 multiplies an element in E6 by an element in E2

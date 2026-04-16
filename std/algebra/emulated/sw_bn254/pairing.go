@@ -85,11 +85,13 @@ func NewPairing(api frontend.API) (*Pairing, error) {
 	}, nil
 }
 
-// Pair calculates the reduced pairing for a set of points ∏ᵢ e(Pᵢ, Qᵢ).
+// Pair calculates the reduced pairing for a set of points
+//
+//	∏ᵢ e(Pᵢ, Qᵢ).
 //
 // This function checks that the Qᵢ are in the correct subgroup, but does not
 // check Pᵢ. See AssertIsOnG1.
-func (pr Pairing) Pair(P []*G1Affine, Q []*G2Affine) (*GTEl, error) {
+func (pr *Pairing) Pair(P []*G1Affine, Q []*G2Affine) (*GTEl, error) {
 	res, err := pr.MillerLoop(P, Q)
 	if err != nil {
 		return nil, fmt.Errorf("miller loop: %w", err)
@@ -102,7 +104,7 @@ func (pr Pairing) Pair(P []*G1Affine, Q []*G2Affine) (*GTEl, error) {
 // where d = (p¹²-1)/r = (p¹²-1)/Φ₁₂(p) ⋅ Φ₁₂(p)/r = (p⁶-1)(p²+1)(p⁴ - p² +1)/r
 // we use instead d=s ⋅ (p⁶-1)(p²+1)(p⁴ - p² +1)/r
 // where s is the cofactor 2x₀(6x₀²+3x₀+1)
-func (pr Pairing) FinalExponentiation(e *GTEl) *GTEl {
+func (pr *Pairing) FinalExponentiation(e *GTEl) *GTEl {
 	// Easy part
 	// (p⁶-1)(p²+1)
 	t0 := pr.Ext12.Conjugate(e)
@@ -149,7 +151,7 @@ func (pr Pairing) FinalExponentiation(e *GTEl) *GTEl {
 // The method follows Section 4 of [On Proving Pairings] paper by A. Novakovic and L. Eagen.
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
-func (pr Pairing) AssertFinalExponentiationIsOne(a *GTEl) {
+func (pr *Pairing) AssertFinalExponentiationIsOne(a *GTEl) {
 	tower := pr.Ext12.ToTower(a)
 
 	res, err := pr.curveF.NewHint(finalExpHint, 18, tower[0], tower[1], tower[2], tower[3], tower[4], tower[5], tower[6], tower[7], tower[8], tower[9], tower[10], tower[11])
@@ -217,7 +219,7 @@ func (pr Pairing) AssertFinalExponentiationIsOne(a *GTEl) {
 //
 // This function checks that the Qᵢ are in the correct subgroup, but does not
 // check Pᵢ. See AssertIsOnG1.
-func (pr Pairing) PairingCheck(P []*G1Affine, Q []*G2Affine) error {
+func (pr *Pairing) PairingCheck(P []*G1Affine, Q []*G2Affine) error {
 	// check input size match
 	nP := len(P)
 	nQ := len(Q)
@@ -305,19 +307,19 @@ func (pr Pairing) PairingCheck(P []*G1Affine, Q []*G2Affine) error {
 	return nil
 }
 
-func (pr Pairing) IsEqual(x, y *GTEl) frontend.Variable {
+func (pr *Pairing) IsEqual(x, y *GTEl) frontend.Variable {
 	return pr.Ext12.IsEqual(x, y)
 }
 
-func (pr Pairing) AssertIsEqual(x, y *GTEl) {
+func (pr *Pairing) AssertIsEqual(x, y *GTEl) {
 	pr.Ext12.AssertIsEqual(x, y)
 }
 
-func (pr Pairing) AssertIsOnCurve(P *G1Affine) {
+func (pr *Pairing) AssertIsOnCurve(P *G1Affine) {
 	pr.curve.AssertIsOnCurve(P)
 }
 
-func (pr Pairing) MuxG2(sel frontend.Variable, inputs ...*G2Affine) *G2Affine {
+func (pr *Pairing) MuxG2(sel frontend.Variable, inputs ...*G2Affine) *G2Affine {
 	if len(inputs) == 0 {
 		return nil
 	}
@@ -381,7 +383,7 @@ func (pr Pairing) MuxG2(sel frontend.Variable, inputs ...*G2Affine) *G2Affine {
 	return &ret
 }
 
-func (pr Pairing) MuxGt(sel frontend.Variable, inputs ...*GTEl) *GTEl {
+func (pr *Pairing) MuxGt(sel frontend.Variable, inputs ...*GTEl) *GTEl {
 	if len(inputs) == 0 {
 		return nil
 	}
@@ -431,7 +433,7 @@ func (pr Pairing) MuxGt(sel frontend.Variable, inputs ...*GTEl) *GTEl {
 	return &ret
 }
 
-func (pr Pairing) computeTwistEquation(Q *G2Affine) (left, right *fields_bn254.E2) {
+func (pr *Pairing) computeTwistEquation(Q *G2Affine) (left, right *fields_bn254.E2) {
 	// Twist: Y² == X³ + aX + b, where a=0 and b=3/(9+u)
 	// (X,Y) ∈ {Y² == X³ + aX + b} U (0,0)
 
@@ -445,26 +447,26 @@ func (pr Pairing) computeTwistEquation(Q *G2Affine) (left, right *fields_bn254.E
 	return left, right
 }
 
-func (pr Pairing) AssertIsOnTwist(Q *G2Affine) {
+func (pr *Pairing) AssertIsOnTwist(Q *G2Affine) {
 	left, right := pr.computeTwistEquation(Q)
 	pr.Ext2.AssertIsEqual(left, right)
 }
 
 // IsOnTwist returns a boolean indicating if the G2 point is in the twist.
-func (pr Pairing) IsOnTwist(Q *G2Affine) frontend.Variable {
+func (pr *Pairing) IsOnTwist(Q *G2Affine) frontend.Variable {
 	left, right := pr.computeTwistEquation(Q)
 	diff := pr.Ext2.Sub(left, right)
 	return pr.Ext2.IsZero(diff)
 }
 
-func (pr Pairing) AssertIsOnG1(P *G1Affine) {
+func (pr *Pairing) AssertIsOnG1(P *G1Affine) {
 	// BN254 has a prime order, so we only
 	// 1- Check P is on the curve
 	pr.AssertIsOnCurve(P)
 }
 
 // computeG2ShortVector computes ψ³([2x₀]Q) - ψ²([x₀]Q) - ψ([x₀]Q) - [x₀]Q
-func (pr Pairing) computeG2ShortVector(Q *G2Affine) (_Q *G2Affine) {
+func (pr *Pairing) computeG2ShortVector(Q *G2Affine) (_Q *G2Affine) {
 	// [x₀]Q
 	xQ := pr.g2.scalarMulBySeed(Q)
 	// ψ([x₀]Q)
@@ -482,7 +484,7 @@ func (pr Pairing) computeG2ShortVector(Q *G2Affine) (_Q *G2Affine) {
 	return _Q
 }
 
-func (pr Pairing) AssertIsOnG2(Q *G2Affine) {
+func (pr *Pairing) AssertIsOnG2(Q *G2Affine) {
 	// 1- Check Q is on the curve
 	pr.AssertIsOnTwist(Q)
 
@@ -496,7 +498,7 @@ func (pr Pairing) AssertIsOnG2(Q *G2Affine) {
 
 // IsOnG2 returns a boolean indicating if the G2 point is on the curve and in
 // the subgroup.
-func (pr Pairing) IsOnG2(Q *G2Affine) frontend.Variable {
+func (pr *Pairing) IsOnG2(Q *G2Affine) frontend.Variable {
 	// 1 - is Q on curve
 	isOnCurve := pr.IsOnTwist(Q)
 	// 2 - is Q in the subgroup
@@ -518,8 +520,12 @@ var loopCounter = [66]int8{
 }
 
 // MillerLoop computes the multi-Miller loop
-// ∏ᵢ { fᵢ_{6x₀+2,Q}(P) · ℓᵢ_{[6x₀+2]Q,π(Q)}(P) · ℓᵢ_{[6x₀+2]Q+π(Q),-π²(Q)}(P) }
-func (pr Pairing) MillerLoop(P []*G1Affine, Q []*G2Affine) (*GTEl, error) {
+//
+//	∏ᵢ { fᵢ_{6x₀+2,Q}(P) · ℓᵢ_{[6x₀+2]Q,π(Q)}(P) · ℓᵢ_{[6x₀+2]Q+π(Q),-π²(Q)}(P) }
+//
+// This function checks that the Qᵢ are in the correct subgroup, but does not
+// check Pᵢ. See AssertIsOnG1.
+func (pr *Pairing) MillerLoop(P []*G1Affine, Q []*G2Affine) (*GTEl, error) {
 
 	// check input size match
 	n := len(P)
@@ -539,7 +545,7 @@ func (pr Pairing) MillerLoop(P []*G1Affine, Q []*G2Affine) (*GTEl, error) {
 }
 
 // millerLoopLines computes the multi-Miller loop from points in G1 and precomputed lines in G2
-func (pr Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init *GTEl, first bool) (*GTEl, error) {
+func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init *GTEl, first bool) (*GTEl, error) {
 
 	// check input size match
 	n := len(P)
@@ -620,14 +626,22 @@ func (pr Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init *
 		}
 
 		if n >= 3 {
-			// k >= 2
-			for k := 2; k < n; k++ {
-				// line evaluation at P[k]
-				// ℓ × res
-				res = pr.MulBy01379(
-					res,
+			// k >= 2: batch lines 2-by-2
+			for k := 3; k < n; k += 2 {
+				prodLines = pr.Mul01379By01379(
 					pr.Ext2.MulByElement(&lines[k][0][j].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][0][j].R1, yInv[k]),
+					pr.Ext2.MulByElement(&lines[k-1][0][j].R0, xNegOverY[k-1]),
+					pr.Ext2.MulByElement(&lines[k-1][0][j].R1, yInv[k-1]),
+				)
+				res = pr.Ext12.MulBy012346789(res, prodLines)
+			}
+			// Handle remaining line if (n-2) is odd
+			if (n-2)%2 != 0 {
+				res = pr.MulBy01379(
+					res,
+					pr.Ext2.MulByElement(&lines[n-1][0][j].R0, xNegOverY[n-1]),
+					pr.Ext2.MulByElement(&lines[n-1][0][j].R1, yInv[n-1]),
 				)
 			}
 		}
@@ -639,11 +653,22 @@ func (pr Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init *
 
 		switch loopCounter[i] {
 		case 0:
-			for k := 0; k < n; k++ {
-				res = pr.MulBy01379(
-					res,
+			// Batch lines 2-by-2 across pairs using sparse×sparse multiplication
+			for k := 1; k < n; k += 2 {
+				prodLines = pr.Mul01379By01379(
 					pr.Ext2.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][0][i].R1, yInv[k]),
+					pr.Ext2.MulByElement(&lines[k-1][0][i].R0, xNegOverY[k-1]),
+					pr.Ext2.MulByElement(&lines[k-1][0][i].R1, yInv[k-1]),
+				)
+				res = pr.Ext12.MulBy012346789(res, prodLines)
+			}
+			// Handle odd remaining line
+			if n%2 != 0 {
+				res = pr.MulBy01379(
+					res,
+					pr.Ext2.MulByElement(&lines[n-1][0][i].R0, xNegOverY[n-1]),
+					pr.Ext2.MulByElement(&lines[n-1][0][i].R1, yInv[n-1]),
 				)
 			}
 		case 1:
@@ -702,11 +727,10 @@ func (pr Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init *
 // doubleAndAddStep doubles p1 and adds or subs p2 to the result in affine coordinates, based on the isSub boolean.
 // Then evaluates the lines going through p1 and p2 or -p2 (line1) and p1 and p1+p2 or p1-p2 (line2).
 // https://eprint.iacr.org/2022/1162 (Section 6.1)
-func (pr Pairing) doubleAndAddStep(p1, p2 *g2AffP, isSub bool) (*g2AffP, *lineEvaluation, *lineEvaluation) {
+func (pr *Pairing) doubleAndAddStep(p1, p2 *g2AffP, isSub bool) (*g2AffP, *lineEvaluation, *lineEvaluation) {
 
 	var line1, line2 lineEvaluation
 	var p g2AffP
-	mone := pr.curveF.NewElement(-1)
 
 	// compute λ1 = (y1-y2)/(x1-x2) or λ1 = (y1+y2)/(x1-x2) if isSub is true
 	var n *fields_bn254.E2
@@ -719,16 +743,16 @@ func (pr Pairing) doubleAndAddStep(p1, p2 *g2AffP, isSub bool) (*g2AffP, *lineEv
 	λ1 := pr.Ext2.DivUnchecked(n, d)
 
 	// compute x3 =λ1²-x1-x2
-	x30 := pr.curveF.Eval([][]*baseEl{{&λ1.A0, &λ1.A0}, {mone, &λ1.A1, &λ1.A1}, {mone, &p1.X.A0}, {mone, &p2.X.A0}}, []int{1, 1, 1, 1})
-	x31 := pr.curveF.Eval([][]*baseEl{{&λ1.A0, &λ1.A1}, {mone, &p1.X.A1}, {mone, &p2.X.A1}}, []int{2, 1, 1})
+	x30 := pr.curveF.Eval([][]*baseEl{{&λ1.A0, &λ1.A0}, {&λ1.A1, &λ1.A1}, {&p1.X.A0}, {&p2.X.A0}}, []int{1, -1, -1, -1})
+	x31 := pr.curveF.Eval([][]*baseEl{{&λ1.A0, &λ1.A1}, {&p1.X.A1}, {&p2.X.A1}}, []int{2, -1, -1})
 	x3 := &fields_bn254.E2{A0: *x30, A1: *x31}
 
 	// omit y3 computation
 
 	// compute line1
 	line1.R0 = *λ1
-	line1.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ1.A0, &p1.X.A0}, {mone, &λ1.A1, &p1.X.A1}, {mone, &p1.Y.A0}}, []int{1, 1, 1})
-	line1.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ1.A0, &p1.X.A1}, {&λ1.A1, &p1.X.A0}, {mone, &p1.Y.A1}}, []int{1, 1, 1})
+	line1.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ1.A0, &p1.X.A0}, {&λ1.A1, &p1.X.A1}, {&p1.Y.A0}}, []int{1, -1, -1})
+	line1.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ1.A0, &p1.X.A1}, {&λ1.A1, &p1.X.A0}, {&p1.Y.A1}}, []int{1, 1, -1})
 
 	// compute λ2 = -λ1-2y1/(x3-x1)
 	n = pr.Ext2.MulByConstElement(&p1.Y, big.NewInt(2))
@@ -738,14 +762,14 @@ func (pr Pairing) doubleAndAddStep(p1, p2 *g2AffP, isSub bool) (*g2AffP, *lineEv
 	λ2 = pr.Ext2.Neg(λ2)
 
 	// compute x4 = λ2²-x1-x3
-	x40 := pr.curveF.Eval([][]*baseEl{{&λ2.A0, &λ2.A0}, {mone, &λ2.A1, &λ2.A1}, {mone, &p1.X.A0}, {mone, x30}}, []int{1, 1, 1, 1})
-	x41 := pr.curveF.Eval([][]*baseEl{{&λ2.A0, &λ2.A1}, {mone, &p1.X.A1}, {mone, x31}}, []int{2, 1, 1})
+	x40 := pr.curveF.Eval([][]*baseEl{{&λ2.A0, &λ2.A0}, {&λ2.A1, &λ2.A1}, {&p1.X.A0}, {x30}}, []int{1, -1, -1, -1})
+	x41 := pr.curveF.Eval([][]*baseEl{{&λ2.A0, &λ2.A1}, {&p1.X.A1}, {x31}}, []int{2, -1, -1})
 	x4 := &fields_bn254.E2{A0: *x40, A1: *x41}
 
 	// compute y4 = λ2(x1 - x4)-y1
 	y4 := pr.Ext2.Sub(&p1.X, x4)
-	y40 := pr.curveF.Eval([][]*baseEl{{&λ2.A0, &y4.A0}, {mone, &λ2.A1, &y4.A1}, {mone, &p1.Y.A0}}, []int{1, 1, 1})
-	y41 := pr.curveF.Eval([][]*baseEl{{&λ2.A0, &y4.A1}, {&λ2.A1, &y4.A0}, {mone, &p1.Y.A1}}, []int{1, 1, 1})
+	y40 := pr.curveF.Eval([][]*baseEl{{&λ2.A0, &y4.A0}, {&λ2.A1, &y4.A1}, {&p1.Y.A0}}, []int{1, -1, -1})
+	y41 := pr.curveF.Eval([][]*baseEl{{&λ2.A0, &y4.A1}, {&λ2.A1, &y4.A0}, {&p1.Y.A1}}, []int{1, 1, -1})
 	y4 = &fields_bn254.E2{A0: *y40, A1: *y41}
 
 	p.X = *x4
@@ -753,19 +777,18 @@ func (pr Pairing) doubleAndAddStep(p1, p2 *g2AffP, isSub bool) (*g2AffP, *lineEv
 
 	// compute line2
 	line2.R0 = *λ2
-	line2.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ2.A0, &p1.X.A0}, {mone, &λ2.A1, &p1.X.A1}, {mone, &p1.Y.A0}}, []int{1, 1, 1})
-	line2.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ2.A0, &p1.X.A1}, {&λ2.A1, &p1.X.A0}, {mone, &p1.Y.A1}}, []int{1, 1, 1})
+	line2.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ2.A0, &p1.X.A0}, {&λ2.A1, &p1.X.A1}, {&p1.Y.A0}}, []int{1, -1, -1})
+	line2.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ2.A0, &p1.X.A1}, {&λ2.A1, &p1.X.A0}, {&p1.Y.A1}}, []int{1, 1, -1})
 
 	return &p, &line1, &line2
 }
 
 // doubleStep doubles p1 in affine coordinates, and evaluates the tangent line to p1.
 // https://eprint.iacr.org/2022/1162 (Section 6.1)
-func (pr Pairing) doubleStep(p1 *g2AffP) (*g2AffP, *lineEvaluation) {
+func (pr *Pairing) doubleStep(p1 *g2AffP) (*g2AffP, *lineEvaluation) {
 
 	var p g2AffP
 	var line lineEvaluation
-	mone := pr.curveF.NewElement(-1)
 
 	// λ = 3x²/2y
 	n := pr.Ext2.Square(&p1.X)
@@ -774,22 +797,22 @@ func (pr Pairing) doubleStep(p1 *g2AffP) (*g2AffP, *lineEvaluation) {
 	λ := pr.Ext2.DivUnchecked(n, d)
 
 	// xr = λ²-2x
-	xr0 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &λ.A0}, {mone, &λ.A1, &λ.A1}, {mone, &p1.X.A0}}, []int{1, 1, 2})
-	xr1 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &λ.A1}, {mone, &p1.X.A1}}, []int{2, 2})
+	xr0 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &λ.A0}, {&λ.A1, &λ.A1}, {&p1.X.A0}}, []int{1, -1, -2})
+	xr1 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &λ.A1}, {&p1.X.A1}}, []int{2, -2})
 	xr := &fields_bn254.E2{A0: *xr0, A1: *xr1}
 
 	// yr = λ(x-xr)-y
 	yr := pr.Ext2.Sub(&p1.X, xr)
-	yr0 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &yr.A0}, {mone, &λ.A1, &yr.A1}, {mone, &p1.Y.A0}}, []int{1, 1, 1})
-	yr1 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &yr.A1}, {&λ.A1, &yr.A0}, {mone, &p1.Y.A1}}, []int{1, 1, 1})
+	yr0 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &yr.A0}, {&λ.A1, &yr.A1}, {&p1.Y.A0}}, []int{1, -1, -1})
+	yr1 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &yr.A1}, {&λ.A1, &yr.A0}, {&p1.Y.A1}}, []int{1, 1, -1})
 	yr = &fields_bn254.E2{A0: *yr0, A1: *yr1}
 
 	p.X = *xr
 	p.Y = *yr
 
 	line.R0 = *λ
-	line.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A0}, {mone, &λ.A1, &p1.X.A1}, {mone, &p1.Y.A0}}, []int{1, 1, 1})
-	line.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A1}, {&λ.A1, &p1.X.A0}, {mone, &p1.Y.A1}}, []int{1, 1, 1})
+	line.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A0}, {&λ.A1, &p1.X.A1}, {&p1.Y.A0}}, []int{1, -1, -1})
+	line.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A1}, {&λ.A1, &p1.X.A0}, {&p1.Y.A1}}, []int{1, 1, -1})
 
 	return &p, &line
 
@@ -797,9 +820,7 @@ func (pr Pairing) doubleStep(p1 *g2AffP) (*g2AffP, *lineEvaluation) {
 
 // addStep adds p1 and p2 in affine coordinates, and evaluates the line through p1 and p2.
 // https://eprint.iacr.org/2022/1162 (Section 6.1)
-func (pr Pairing) addStep(p1, p2 *g2AffP) (*g2AffP, *lineEvaluation) {
-
-	mone := pr.curveF.NewElement(-1)
+func (pr *Pairing) addStep(p1, p2 *g2AffP) (*g2AffP, *lineEvaluation) {
 
 	// compute λ = (y2-y1)/(x2-x1)
 	p2ypy := pr.Ext2.Sub(&p2.Y, &p1.Y)
@@ -807,14 +828,14 @@ func (pr Pairing) addStep(p1, p2 *g2AffP) (*g2AffP, *lineEvaluation) {
 	λ := pr.Ext2.DivUnchecked(p2ypy, p2xpx)
 
 	// xr = λ²-x1-x2
-	xr0 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &λ.A0}, {mone, &λ.A1, &λ.A1}, {mone, &p1.X.A0}, {mone, &p2.X.A0}}, []int{1, 1, 1, 1})
-	xr1 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &λ.A1}, {mone, &p1.X.A1}, {mone, &p2.X.A1}}, []int{2, 1, 1})
+	xr0 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &λ.A0}, {&λ.A1, &λ.A1}, {&p1.X.A0}, {&p2.X.A0}}, []int{1, -1, -1, -1})
+	xr1 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &λ.A1}, {&p1.X.A1}, {&p2.X.A1}}, []int{2, -1, -1})
 	xr := &fields_bn254.E2{A0: *xr0, A1: *xr1}
 
 	// yr = λ(x1-xr) - y1
 	yr := pr.Ext2.Sub(&p1.X, xr)
-	yr0 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &yr.A0}, {mone, &λ.A1, &yr.A1}, {mone, &p1.Y.A0}}, []int{1, 1, 1})
-	yr1 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &yr.A1}, {&λ.A1, &yr.A0}, {mone, &p1.Y.A1}}, []int{1, 1, 1})
+	yr0 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &yr.A0}, {&λ.A1, &yr.A1}, {&p1.Y.A0}}, []int{1, -1, -1})
+	yr1 := pr.curveF.Eval([][]*baseEl{{&λ.A0, &yr.A1}, {&λ.A1, &yr.A0}, {&p1.Y.A1}}, []int{1, 1, -1})
 	yr = &fields_bn254.E2{A0: *yr0, A1: *yr1}
 
 	var res g2AffP
@@ -823,17 +844,15 @@ func (pr Pairing) addStep(p1, p2 *g2AffP) (*g2AffP, *lineEvaluation) {
 
 	var line lineEvaluation
 	line.R0 = *λ
-	line.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A0}, {mone, &λ.A1, &p1.X.A1}, {mone, &p1.Y.A0}}, []int{1, 1, 1})
-	line.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A1}, {&λ.A1, &p1.X.A0}, {mone, &p1.Y.A1}}, []int{1, 1, 1})
+	line.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A0}, {&λ.A1, &p1.X.A1}, {&p1.Y.A0}}, []int{1, -1, -1})
+	line.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A1}, {&λ.A1, &p1.X.A0}, {&p1.Y.A1}}, []int{1, 1, -1})
 
 	return &res, &line
 
 }
 
 // lineCompute computes the line through p1 and p2, but does not compute p1+p2.
-func (pr Pairing) lineCompute(p1, p2 *g2AffP) *lineEvaluation {
-
-	mone := pr.curveF.NewElement(-1)
+func (pr *Pairing) lineCompute(p1, p2 *g2AffP) *lineEvaluation {
 
 	// compute λ = (y2+y1)/(x2-x1)
 	qypy := pr.Ext2.Add(&p1.Y, &p2.Y)
@@ -842,8 +861,8 @@ func (pr Pairing) lineCompute(p1, p2 *g2AffP) *lineEvaluation {
 
 	var line lineEvaluation
 	line.R0 = *λ
-	line.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A0}, {mone, &λ.A1, &p1.X.A1}, {mone, &p1.Y.A0}}, []int{1, 1, 1})
-	line.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A1}, {&λ.A1, &p1.X.A0}, {mone, &p1.Y.A1}}, []int{1, 1, 1})
+	line.R1.A0 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A0}, {&λ.A1, &p1.X.A1}, {&p1.Y.A0}}, []int{1, -1, -1})
+	line.R1.A1 = *pr.curveF.Eval([][]*baseEl{{&λ.A0, &p1.X.A1}, {&λ.A1, &p1.X.A0}, {&p1.Y.A1}}, []int{1, 1, -1})
 
 	return &line
 
@@ -853,7 +872,7 @@ func (pr Pairing) lineCompute(p1, p2 *g2AffP) *lineEvaluation {
 // and multiplies it in 𝔽p¹² by previous.
 //
 // This method is needed for evmprecompiles/ecpair.
-func (pr Pairing) MillerLoopAndMul(P *G1Affine, Q *G2Affine, previous *GTEl) (*GTEl, error) {
+func (pr *Pairing) MillerLoopAndMul(P *G1Affine, Q *G2Affine, previous *GTEl) (*GTEl, error) {
 	res, err := pr.MillerLoop([]*G1Affine{P}, []*G2Affine{Q})
 	if err != nil {
 		return nil, fmt.Errorf("miller loop: %w", err)
@@ -864,7 +883,7 @@ func (pr Pairing) MillerLoopAndMul(P *G1Affine, Q *G2Affine, previous *GTEl) (*G
 
 // millerLoopAndFinalExpResult computes the Miller loop between P and Q,
 // multiplies it in 𝔽p¹² by previous and returns the result.
-func (pr Pairing) millerLoopAndFinalExpResult(P *G1Affine, Q *G2Affine, previous *GTEl) *GTEl {
+func (pr *Pairing) millerLoopAndFinalExpResult(P *G1Affine, Q *G2Affine, previous *GTEl) *GTEl {
 	tower := pr.ToTower(previous)
 
 	// hint the non-residue witness
@@ -956,7 +975,7 @@ func (pr Pairing) millerLoopAndFinalExpResult(P *G1Affine, Q *G2Affine, previous
 // This method is needed for evmprecompiles/ecpair.
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
-func (pr Pairing) IsMillerLoopAndFinalExpOne(P *G1Affine, Q *G2Affine, previous *GTEl) frontend.Variable {
+func (pr *Pairing) IsMillerLoopAndFinalExpOne(P *G1Affine, Q *G2Affine, previous *GTEl) frontend.Variable {
 	t2 := pr.millerLoopAndFinalExpResult(P, Q, previous)
 
 	res := pr.IsEqual(t2, pr.Ext12.One())
@@ -972,7 +991,7 @@ func (pr Pairing) IsMillerLoopAndFinalExpOne(P *G1Affine, Q *G2Affine, previous 
 // This method is needed for evmprecompiles/ecpair.
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
-func (pr Pairing) AssertMillerLoopAndFinalExpIsOne(P *G1Affine, Q *G2Affine, previous *GTEl) {
+func (pr *Pairing) AssertMillerLoopAndFinalExpIsOne(P *G1Affine, Q *G2Affine, previous *GTEl) {
 	t2 := pr.millerLoopAndFinalExpResult(P, Q, previous)
 	pr.AssertIsEqual(t2, pr.Ext12.One())
 }

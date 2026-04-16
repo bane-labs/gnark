@@ -3,6 +3,7 @@ package test
 import (
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/consensys/gnark"
@@ -99,5 +100,118 @@ func TestPreCompileHook(t *testing.T) {
 	}
 	if !isDeferCalled {
 		t.Error("callback not called")
+	}
+}
+
+type divUncheckedZeroCircuit struct {
+	Case divUncheckedCase `gnark:"-"`
+	A    frontend.Variable
+	B    frontend.Variable
+}
+
+func (c *divUncheckedZeroCircuit) Define(api frontend.API) error {
+	var res frontend.Variable
+	switch c.Case {
+	case divUncheckedVarVar:
+		res = api.DivUnchecked(c.A, c.B)
+	case divUncheckedVarConst:
+		res = api.DivUnchecked(c.A, 0)
+	case divUncheckedConstVar:
+		res = api.DivUnchecked(0, c.B)
+	case divUncheckedConstConst:
+		res = api.DivUnchecked(0, 0)
+	default:
+		return fmt.Errorf("unknown case %d", c.Case)
+	}
+	api.AssertIsEqual(res, 0)
+	return nil
+}
+
+type divUncheckedCase uint8
+
+const (
+	divUncheckedVarVar divUncheckedCase = iota
+	divUncheckedVarConst
+	divUncheckedConstVar
+	divUncheckedConstConst
+)
+
+// squareHint returns x^2 for the first input.
+func squareHint(_ *big.Int, inputs []*big.Int, outputs []*big.Int) error {
+	outputs[0].Mul(inputs[0], inputs[0])
+	return nil
+}
+
+// zeroHint always returns 0.
+func zeroHint(_ *big.Int, inputs []*big.Int, outputs []*big.Int) error {
+	outputs[0].SetUint64(0)
+	return nil
+}
+
+type squareHintCircuit struct {
+	X       frontend.Variable
+	XSquare frontend.Variable
+}
+
+func (c *squareHintCircuit) Define(api frontend.API) error {
+	res, err := api.Compiler().NewHint(squareHint, 1, c.X)
+	if err != nil {
+		return err
+	}
+	api.AssertIsEqual(res[0], c.XSquare)
+	return nil
+}
+
+func TestHintReplacement(t *testing.T) {
+	field := ecc.BN254.ScalarField()
+
+	t.Run("without replacement", func(t *testing.T) {
+		err := IsSolved(
+			&squareHintCircuit{},
+			&squareHintCircuit{X: 3, XSquare: 9},
+			field,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("with replacement", func(t *testing.T) {
+		err := IsSolved(
+			&squareHintCircuit{},
+			&squareHintCircuit{X: 3, XSquare: 0},
+			field,
+			WithReplacementHint(solver.GetHintID(squareHint), zeroHint),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestDivUncheckedZeroPanicsInEngine(t *testing.T) {
+	tests := []struct {
+		name string
+		mode divUncheckedCase
+	}{
+		{name: "var_var", mode: divUncheckedVarVar},
+		{name: "var_const", mode: divUncheckedVarConst},
+		{name: "const_var", mode: divUncheckedConstVar},
+		{name: "const_const", mode: divUncheckedConstConst},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := IsSolved(&divUncheckedZeroCircuit{Case: tc.mode}, &divUncheckedZeroCircuit{
+				Case: tc.mode,
+				A:    0,
+				B:    0,
+			}, ecc.BN254.ScalarField())
+			if err == nil {
+				t.Fatal("expected test engine to fail on DivUnchecked(0, 0)")
+			}
+			if !strings.Contains(err.Error(), "DivUnchecked(0, 0) called") {
+				t.Fatalf("expected explicit DivUnchecked(0, 0) error, got %v", err)
+			}
+		})
 	}
 }

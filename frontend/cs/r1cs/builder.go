@@ -27,11 +27,9 @@ import (
 	babybearr1cs "github.com/consensys/gnark/constraint/babybear"
 	bls12377r1cs "github.com/consensys/gnark/constraint/bls12-377"
 	bls12381r1cs "github.com/consensys/gnark/constraint/bls12-381"
-	bls24315r1cs "github.com/consensys/gnark/constraint/bls24-315"
-	bls24317r1cs "github.com/consensys/gnark/constraint/bls24-317"
 	bn254r1cs "github.com/consensys/gnark/constraint/bn254"
-	bw6633r1cs "github.com/consensys/gnark/constraint/bw6-633"
 	bw6761r1cs "github.com/consensys/gnark/constraint/bw6-761"
+	grumpkinr1cs "github.com/consensys/gnark/constraint/grumpkin"
 	koalabearr1cs "github.com/consensys/gnark/constraint/koalabear"
 	"github.com/consensys/gnark/constraint/solver"
 	tinyfieldr1cs "github.com/consensys/gnark/constraint/tinyfield"
@@ -62,7 +60,8 @@ type builder[E constraint.Element] struct {
 	mbuf1 expr.LinearExpression[E]
 	mbuf2 expr.LinearExpression[E]
 
-	genericGate constraint.BlueprintID
+	genericGate      constraint.BlueprintID
+	batchInverseGate constraint.BlueprintID
 }
 
 // initialCapacity has quite some impact on frontend performance, especially on large circuits size
@@ -96,13 +95,11 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 			bldrT.cs = bn254r1cs.NewR1CS(config.Capacity)
 		case ecc.BW6_761:
 			bldrT.cs = bw6761r1cs.NewR1CS(config.Capacity)
-		case ecc.BW6_633:
-			bldrT.cs = bw6633r1cs.NewR1CS(config.Capacity)
-		case ecc.BLS24_315:
-			bldrT.cs = bls24315r1cs.NewR1CS(config.Capacity)
-		case ecc.BLS24_317:
-			bldrT.cs = bls24317r1cs.NewR1CS(config.Capacity)
 		default:
+			if field.Cmp(ecc.GRUMPKIN.ScalarField()) == 0 {
+				bldrT.cs = grumpkinr1cs.NewR1CS(config.Capacity)
+				break
+			}
 			panic("not implemented")
 		}
 	case *builder[constraint.U32]:
@@ -130,6 +127,7 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 	bldr.cs.AddPublicVariable("1")
 
 	bldr.genericGate = bldr.cs.AddBlueprint(&constraint.BlueprintGenericR1C{})
+	bldr.batchInverseGate = bldr.cs.AddBlueprint(&constraint.BlueprintBatchInverse[E]{})
 
 	var zero E
 	bldr.eZero = expr.NewLinearExpression(0, zero)
@@ -189,14 +187,10 @@ func (builder *builder[E]) newR1C(l, r, o frontend.Variable) constraint.R1C {
 	R := builder.getLinearExpression(r)
 	O := builder.getLinearExpression(o)
 
-	// interestingly, this is key to groth16 performance.
-	// l * r == r * l == o
-	// but the "l" linear expression is going to end up in the A matrix
-	// the "r" linear expression is going to end up in the B matrix
-	// the less Variable we have appearing in the B matrix, the more likely groth16.Setup
-	// is going to produce infinity points in pk.G1.B and pk.G2.B, which will speed up proving time
-	if len(L) > len(R) {
-		// TODO @gbotrel shouldn't we do the opposite? Code doesn't match comment.
+	// We want R (the B matrix) to have fewer variables to increase the chance
+	// of infinity points in pk.G1.B / pk.G2.B during Groth16 setup,
+	// which improves proving time. Therefore, we swap L and R if R has more terms.
+	if len(R) > len(L) {
 		L, R = R, L
 	}
 
@@ -495,7 +489,12 @@ func (builder *builder[E]) compress(le expr.LinearExpression[E]) expr.LinearExpr
 }
 
 func (builder *builder[E]) Defer(cb func(frontend.API) error) {
-	circuitdefer.Put(builder, cb)
+	// in case the builder is wrapped implementing kvstore.Store methods then we
+	// may put and retrieve deferred functions from different storages. We use
+	// the unwrapped builder for storing deferred functions to avoid this issue.
+	// See [callDeferred] function in frontend/compile.go
+	compiler := builder.Compiler()
+	circuitdefer.Put(compiler, cb)
 }
 
 func (*builder[E]) FrontendType() frontendtype.Type {

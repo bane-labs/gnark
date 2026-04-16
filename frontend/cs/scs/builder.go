@@ -26,11 +26,9 @@ import (
 	babybearr1cs "github.com/consensys/gnark/constraint/babybear"
 	bls12377r1cs "github.com/consensys/gnark/constraint/bls12-377"
 	bls12381r1cs "github.com/consensys/gnark/constraint/bls12-381"
-	bls24315r1cs "github.com/consensys/gnark/constraint/bls24-315"
-	bls24317r1cs "github.com/consensys/gnark/constraint/bls24-317"
 	bn254r1cs "github.com/consensys/gnark/constraint/bn254"
-	bw6633r1cs "github.com/consensys/gnark/constraint/bw6-633"
 	bw6761r1cs "github.com/consensys/gnark/constraint/bw6-761"
+	grumpkinr1cs "github.com/consensys/gnark/constraint/grumpkin"
 	koalabearr1cs "github.com/consensys/gnark/constraint/koalabear"
 	"github.com/consensys/gnark/constraint/solver"
 	tinyfieldr1cs "github.com/consensys/gnark/constraint/tinyfield"
@@ -63,6 +61,7 @@ type builder[E constraint.Element] struct {
 
 	genericGate                constraint.BlueprintID
 	mulGate, addGate, boolGate constraint.BlueprintID
+	batchInverseGate           constraint.BlueprintID
 
 	// used to avoid repeated allocations
 	bufL expr.LinearExpression[E]
@@ -96,13 +95,11 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 			bT.cs = bn254r1cs.NewSparseR1CS(config.Capacity)
 		case ecc.BW6_761:
 			bT.cs = bw6761r1cs.NewSparseR1CS(config.Capacity)
-		case ecc.BW6_633:
-			bT.cs = bw6633r1cs.NewSparseR1CS(config.Capacity)
-		case ecc.BLS24_315:
-			bT.cs = bls24315r1cs.NewSparseR1CS(config.Capacity)
-		case ecc.BLS24_317:
-			bT.cs = bls24317r1cs.NewSparseR1CS(config.Capacity)
 		default:
+			if field.Cmp(ecc.GRUMPKIN.ScalarField()) == 0 {
+				bT.cs = grumpkinr1cs.NewSparseR1CS(config.Capacity)
+				break
+			}
 			panic("not implemented")
 		}
 	case *builder[constraint.U32]:
@@ -133,6 +130,7 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 	b.mulGate = b.cs.AddBlueprint(&constraint.BlueprintSparseR1CMul[E]{})
 	b.addGate = b.cs.AddBlueprint(&constraint.BlueprintSparseR1CAdd[E]{})
 	b.boolGate = b.cs.AddBlueprint(&constraint.BlueprintSparseR1CBool[E]{})
+	b.batchInverseGate = b.cs.AddBlueprint(&constraint.BlueprintBatchInverse[E]{})
 
 	return b
 }
@@ -678,7 +676,12 @@ func (builder *builder[E]) newDebugInfo(errName string, in ...interface{}) const
 }
 
 func (builder *builder[E]) Defer(cb func(frontend.API) error) {
-	circuitdefer.Put(builder, cb)
+	// in case the builder is wrapped implementing kvstore.Store methods then we
+	// may put and retrieve deferred functions from different storages. We use
+	// the unwrapped builder for storing deferred functions to avoid this issue.
+	// See [callDeferred] function in frontend/compile.go
+	compiler := builder.Compiler()
+	circuitdefer.Put(compiler, cb)
 }
 
 // AddInstruction is used to add custom instructions to the constraint system.

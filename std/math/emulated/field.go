@@ -1,6 +1,7 @@
 package emulated
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math/big"
@@ -11,11 +12,21 @@ import (
 	"github.com/consensys/gnark/internal/smallfields"
 	"github.com/consensys/gnark/internal/utils"
 	"github.com/consensys/gnark/logger"
+	"github.com/consensys/gnark/std/internal/fieldextension"
 	limbs "github.com/consensys/gnark/std/internal/limbcomposition"
-	"github.com/consensys/gnark/std/math/fieldextension"
 	"github.com/consensys/gnark/std/rangecheck"
 	"github.com/rs/zerolog"
-	"golang.org/x/exp/constraints"
+)
+
+const (
+	// rangeCheckBaseLengthForSmallField is the base length used for range
+	// checking when using small field optimization. We start enforcing
+	// the base length only when the number of range checks exceeds
+	// thresholdOptimizeOptimizedOverflow.
+	rangeCheckBaseLengthForSmallField = 16
+	// thresholdForInexactOverflow is the number of range checks after
+	// which we start enforcing the base length for small field optimization.
+	thresholdForInexactOverflow = 55000
 )
 
 // Field holds the configuration for non-native field operations. The field
@@ -47,10 +58,20 @@ type Field[T FieldParams] struct {
 
 	log zerolog.Logger
 
-	constrainedLimbs map[[16]byte]struct{}
+	// constrainedLimbs keeps track of already range checked limbs. The map
+	// value indicates the range check width.
+	constrainedLimbs map[[16]byte]int
 	checker          frontend.Rangechecker
+	nbRangeChecks    int
 
 	deferredChecks []deferredChecker
+
+	// smallFieldMode indicates that the emulated field is small enough that
+	// products fit in the native field and we can use scalar batched verification
+	// instead of polynomial identity testing. This provides significant constraint
+	// reduction for small field emulation (e.g., KoalaBear on BLS12-377).
+	smallFieldMode     bool
+	smallFieldModeOnce sync.Once
 }
 
 type ctxKey[T FieldParams] struct{}
@@ -59,16 +80,18 @@ type ctxKey[T FieldParams] struct{}
 // arithmetic over the field defined by type parameter [FieldParams]. The
 // operations on this type are defined on [Element].
 func NewField[T FieldParams](native frontend.API) (*Field[T], error) {
-	if storer, ok := native.(kvstore.Store); ok {
+	if storer, ok := native.Compiler().(kvstore.Store); ok {
 		ff := storer.GetKeyValue(ctxKey[T]{})
 		if ff, ok := ff.(*Field[T]); ok {
 			return ff, nil
 		}
+	} else {
+		panic("compiler does not implement kvstore.Store")
 	}
 	f := &Field[T]{
 		api:              native,
 		log:              logger.Logger(),
-		constrainedLimbs: make(map[[16]byte]struct{}),
+		constrainedLimbs: make(map[[16]byte]int),
 		checker:          rangecheck.New(native),
 		fParams:          newStaticFieldParams[T](native.Compiler().Field()),
 	}
@@ -106,14 +129,18 @@ func NewField[T FieldParams](native frontend.API) (*Field[T], error) {
 		return f, errors.New("missing api")
 	}
 
-	if uint(f.api.Compiler().FieldBitLen()) < 2*f.fParams.BitsPerLimb()+1 {
+	// to ensure that we can perform the operations, we have to consider the
+	// biggest overflow grow for elements we can have. Currently this is for
+	// subtraction which can have overflow up to 2 bits. We add one more bit of
+	// margin for safety.
+	if uint(f.api.Compiler().FieldBitLen()) < f.fParams.BitsPerLimb()+3 {
 		return nil, fmt.Errorf("elements with limb length %d does not fit into scalar field", f.fParams.BitsPerLimb())
 	}
 
 	native.Compiler().Defer(f.performDeferredChecks)
-	if storer, ok := native.(kvstore.Store); ok {
+	if storer, ok := native.Compiler().(kvstore.Store); ok {
 		storer.SetKeyValue(ctxKey[T]{}, f)
-	}
+	} // other case is already checked above
 	return f, nil
 }
 
@@ -123,7 +150,7 @@ func NewField[T FieldParams](native frontend.API) (*Field[T], error) {
 //   - if this methods interprets v as being the limbs (frontend.Variable or []frontend.Variable),
 //     it constructs a new Element[T] with v as limbs and constraints the limbs to the parameters
 //     of the Field[T].
-func (f *Field[T]) NewElement(v interface{}) *Element[T] {
+func (f *Field[T]) NewElement(v any) *Element[T] {
 	if e, ok := v.(Element[T]); ok {
 		return e.copy()
 	}
@@ -181,9 +208,15 @@ func (f *Field[T]) modulusPrev() *Element[T] {
 // less constraints will be generated.
 // If strict is false, each limbs is constrained to have width as defined by field parameter.
 func (f *Field[T]) packLimbs(limbs []frontend.Variable, strict bool) *Element[T] {
-	e := f.newInternalElement(limbs, 0)
-	f.enforceWidth(e, strict)
-	return e
+	if !f.useSmallFieldOptimization() {
+		e := f.newInternalElement(limbs, 0)
+		f.enforceWidth(e, strict)
+		return e
+	} else {
+		e := f.newInternalElement(limbs, uint(f.smallAdditionalOverflow()))
+		f.smallEnforceWidth(e, strict)
+		return e
+	}
 }
 
 func (f *Field[T]) enforceWidthConditional(a *Element[T]) (didConstrain bool) {
@@ -233,7 +266,7 @@ func (f *Field[T]) enforceWidthConditional(a *Element[T]) (didConstrain bool) {
 				// that we should enforce width for the whole element. But we
 				// still iterate over all limbs just to mark them in the table.
 				didConstrain = true
-				f.constrainedLimbs[h] = struct{}{}
+				break
 			}
 		} else {
 			// we have no way of knowing if the limb has been constrained. To be
@@ -242,7 +275,11 @@ func (f *Field[T]) enforceWidthConditional(a *Element[T]) (didConstrain bool) {
 		}
 	}
 	if didConstrain {
-		f.enforceWidth(a, true)
+		if !f.useSmallFieldOptimization() {
+			f.enforceWidth(a, true)
+		} else {
+			f.smallEnforceWidth(a, true)
+		}
 	}
 	return
 }
@@ -280,26 +317,29 @@ func (f *Field[T]) constantValue(v *Element[T]) (*big.Int, bool) {
 // then the limbs may overflow the native field.
 func (f *Field[T]) maxOverflow() uint {
 	f.maxOfOnce.Do(func() {
+		// if we change this computation then also change maxOverflowReducedResult
 		f.maxOf = uint(f.api.Compiler().FieldBitLen()-2) - f.fParams.BitsPerLimb()
 	})
+	// when we perform non-reducing operations then we have to ensure that we are still
+	// able to reduce the result afterwards (i.e. when doing additions/subtractions).
 	return f.maxOf
 }
 
-func max[T constraints.Ordered](a ...T) T {
-	if len(a) == 0 {
-		var f T
-		return f
-	}
-	m := a[0]
-	for _, v := range a {
-		if v > m {
-			m = v
-		}
-	}
-	return m
+func (f *Field[T]) maxOverflowReducedResult() uint {
+	f.maxOfOnce.Do(func() {
+		// if we change this computation then also change maxOverflow
+		f.maxOf = uint(f.api.Compiler().FieldBitLen()-2) - f.fParams.BitsPerLimb()
+	})
+	// when doing multiplication (or checkZero), the hint always outputs
+	// quotient and result limbs with width BitsPerLimb. As the carry limbs are
+	// additionally shifted by BitsPerLimb, then we have additional BitsPerLimb
+	// bits of margin (relative to the native field width). Keep in mind that
+	// the `maxOf` constant is already BitsPerLimb less than the modulus width,
+	// then we can add BitsPerLimb again twice.
+	return f.maxOf + 2*f.fParams.BitsPerLimb()
 }
 
-func sum[T constraints.Ordered](a ...T) T {
+func sum[T cmp.Ordered](a ...T) T {
 	if len(a) == 0 {
 		var f T
 		return f
@@ -309,4 +349,92 @@ func sum[T constraints.Ordered](a ...T) T {
 		m += v
 	}
 	return m
+}
+
+// useSmallFieldOptimization returns true if we can use the small field
+// optimization for multiplication. The optimization is possible when:
+//   - NbLimbs == 1 (emulated field fits in a single native limb)
+//   - 2 * modBits + margin < nativeBits - 2 (products fit with margin for batching)
+//
+// When these conditions are met, we can use scalar batched verification instead
+// of polynomial identity testing, which significantly reduces constraint counts.
+func (f *Field[T]) useSmallFieldOptimization() bool {
+	f.smallFieldModeOnce.Do(func() {
+		// Small field optimization only works when NbLimbs == 1
+		if f.fParams.NbLimbs() != 1 {
+			f.smallFieldMode = false
+			return
+		}
+
+		// Small field optimization doesn't work when we're already using extension field
+		// for multiplication checks (native field is small)
+		if f.extensionApi != nil {
+			f.smallFieldMode = false
+			return
+		}
+
+		// Check that products fit in the native field with margin for batching.
+		// We need: 2 * modBits + batchingMargin < nativeBits - 2
+		// The margin accounts for:
+		// - γ^i scaling factors in the batched sum
+		// - Multiple terms being summed together
+		// We use 32 bits margin which allows for batching millions of operations.
+		modBits := uint(f.fParams.Modulus().BitLen())
+		nativeBits := uint(f.api.Compiler().FieldBitLen())
+		const batchingMargin = 32
+
+		f.smallFieldMode = 2*modBits+batchingMargin < nativeBits-2
+		if f.smallFieldMode {
+			f.log.Debug().
+				Uint("modBits", modBits).
+				Uint("nativeBits", nativeBits).
+				Msg("using small field optimization for emulated multiplication")
+		}
+	})
+	return f.smallFieldMode
+}
+
+// rangeCheck performs a range check on v to ensure it fits in nbBits.
+// It also keeps track of the number of range checks done, and after a certain
+// threshold switches to using base length range checking for small field
+// optimization.
+//
+// It returns a boolean indicating if the range check was actually performed (i.e. if
+// the limb was not already constrained).
+func (f *Field[T]) rangeCheck(v frontend.Variable, nbBits int) bool {
+	if h, ok := v.(interface{ HashCode() [16]byte }); ok {
+		// if the variable has a hashcode, then we can use it to see if we have
+		// already range checked it.
+		hc := h.HashCode()
+		if existingWidth, ok := f.constrainedLimbs[hc]; ok {
+			// already range checked with a certain width
+			if existingWidth <= nbBits {
+				return false
+			}
+		}
+		// mark as range checked
+		f.constrainedLimbs[hc] = nbBits
+	}
+	// update the number of range checks done. This is only to keep track if we
+	// should switch to the case where instead of exact width we range check
+	// multiple of base length. This reduces number of range checks when
+	// emulating small field.
+	f.nbRangeChecks++
+
+	if f.nbRangeChecks == thresholdForInexactOverflow {
+		// the threshold is reached, set the range checker to use base length.
+		// Now we know that when constructing non-native elements, then we should
+		// set overflow=f.smallAdditionalOverflow()
+		if f.useSmallFieldOptimization() {
+			// in case of emulated small fields we use base length 16 to reduce
+			// needing to range check for [v_lo, v_hi, 2*v_hi].
+			//
+			// But this means that hints could output values which are bigger than
+			// the emulated modulus bitwidth (for example 31 bits). This means we
+			// have to set the overflow of returned elements correctly.
+			f.checker = rangecheck.New(f.api, rangecheck.WithBaseLength(rangeCheckBaseLengthForSmallField))
+		}
+	}
+	f.checker.Check(v, nbBits)
+	return true
 }

@@ -1,7 +1,10 @@
 package test
 
 import (
+	"math/big"
+
 	"github.com/consensys/gnark-crypto/ecc"
+	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/gnark/backend"
 	"github.com/consensys/gnark/backend/groth16"
 	"github.com/consensys/gnark/backend/plonk"
@@ -36,7 +39,6 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 
 	// for each {curve, backend} tuple
 	for _, curve := range opt.curves {
-		curve := curve
 
 		// run in sub-test to contextualize with curve
 		assert.Run(func(assert *Assert) {
@@ -44,7 +46,7 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 			// parse valid / invalid assignments
 			var invalidWitnesses, validWitnesses []_witness
 			for _, a := range opt.validAssignments {
-				w := assert.parseAssignment(circuit, a, curve, opt.checkSerialization)
+				w := assert.parseAssignment(circuit, a, curve.ScalarField(), curve.String(), opt.checkSerialization)
 				validWitnesses = append(validWitnesses, w)
 
 				// check that the assignment is valid with the test engine
@@ -55,7 +57,7 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 			}
 
 			for _, a := range opt.invalidAssignments {
-				w := assert.parseAssignment(circuit, a, curve, opt.checkSerialization)
+				w := assert.parseAssignment(circuit, a, curve.ScalarField(), curve.String(), opt.checkSerialization)
 				invalidWitnesses = append(invalidWitnesses, w)
 
 				// check that the assignment is invalid with the test engine
@@ -67,13 +69,12 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 
 			// for each backend; compile, prove/verify or solve, check serialization if needed.
 			for _, b := range opt.backends {
-				b := b
 
 				// run in sub-test to contextualize with backend
 				assert.Run(func(assert *Assert) {
 
 					// 1- check that the circuit compiles
-					ccs, err := assert.compile(circuit, curve, b, opt.compileOpts)
+					ccs, err := assert.compile(circuit, curve.ScalarField(), b, opt.compileOpts)
 					assert.noError(curve.ScalarField(), err, nil)
 
 					// TODO @gbotrel check serialization round trip with constraint system.
@@ -82,7 +83,6 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 					// we need to run the solver on the constraint system only
 					if !opt.checkProver {
 						for _, w := range invalidWitnesses {
-							w := w
 							assert.Run(func(assert *Assert) {
 								_, err = ccs.Solve(w.full, opt.solverOpts...)
 								assert.error(curve.ScalarField(), err, &w)
@@ -90,7 +90,6 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 						}
 
 						for _, w := range validWitnesses {
-							w := w
 							assert.Run(func(assert *Assert) {
 								_, err = ccs.Solve(w.full, opt.solverOpts...)
 								assert.noError(curve.ScalarField(), err, &w)
@@ -101,7 +100,9 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 					}
 
 					// we need to run the setup, prove and verify and check serialization
-					assert.t.Parallel()
+					if assert.t != nil {
+						assert.t.Parallel()
+					}
 
 					var concreteBackend tBackend
 
@@ -120,9 +121,8 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 
 					// for each valid witness, run the prover and verifier
 					for _, w := range validWitnesses {
-						w := w
 						assert.Run(func(assert *Assert) {
-							checkSolidity := opt.checkSolidity && curve == ecc.BN254
+							checkSolidity := opt.checkSolidity && (curve == ecc.BN254 || curve == ecc.BLS12_381)
 							proverOpts := opt.proverOpts
 							verifierOpts := opt.verifierOpts
 							if b == backend.GROTH16 {
@@ -147,7 +147,7 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 								// check that the proof can be verified by gnark-solidity-checker
 								if _vk, ok := vk.(solidity.VerifyingKey); ok {
 									assert.Run(func(assert *Assert) {
-										assert.solidityVerification(b, _vk, proof, w.public, opt.solidityOpts)
+										assert.solidityVerification(b, curve, _vk, proof, w.public, opt.solidityOpts)
 									}, "solidity")
 								}
 							}
@@ -159,7 +159,6 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 
 					// for each invalid witness, run the prover only, it should fail.
 					for _, w := range invalidWitnesses {
-						w := w
 						assert.Run(func(assert *Assert) {
 							_, err := concreteBackend.prove(ccs, pk, w.full, opt.proverOpts...)
 							assert.error(curve.ScalarField(), err, &w)
@@ -176,6 +175,54 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 			}
 
 		}, curve.String())
+	}
+	if opt.checkSmallField {
+		smf := koalabear.Modulus()
+		smfName := "koalabear"
+		assert.Run(func(assert *Assert) {
+			var invalidWitnesses, validWitnesses []_witness
+			for _, a := range opt.validAssignments {
+				w := assert.parseAssignment(circuit, a, smf, smfName, opt.checkSerialization)
+				validWitnesses = append(validWitnesses, w)
+
+				// check that the assignment is valid with the test engine
+				if !opt.skipTestEngine {
+					err := IsSolved(circuit, w.assignment, smf)
+					assert.noError(smf, err, &w)
+				}
+			}
+
+			for _, a := range opt.invalidAssignments {
+				w := assert.parseAssignment(circuit, a, smf, smfName, opt.checkSerialization)
+				invalidWitnesses = append(invalidWitnesses, w)
+
+				// check that the assignment is invalid with the test engine
+				if !opt.skipTestEngine {
+					err := IsSolved(circuit, w.assignment, smf)
+					assert.error(smf, err, &w)
+				}
+			}
+			// test that the circuit compiles and is deterministic
+			ccs, err := assert.compileU32(circuit, smf, opt.compileOpts)
+			assert.NoError(err, "compile in small field")
+
+			for _, w := range invalidWitnesses {
+				w := w
+				assert.Run(func(assert *Assert) {
+					_, err = ccs.Solve(w.full, opt.solverOpts...)
+					assert.error(smf, err, &w)
+				}, "invalid_witness")
+			}
+
+			for _, w := range validWitnesses {
+				w := w
+				assert.Run(func(assert *Assert) {
+					_, err = ccs.Solve(w.full, opt.solverOpts...)
+					assert.noError(smf, err, &w)
+				}, "valid_witness")
+			}
+
+		}, smfName)
 	}
 
 	// TODO @gbotrel revisit this.
@@ -194,19 +241,19 @@ type _witness struct {
 	assignment frontend.Circuit
 }
 
-func (assert *Assert) parseAssignment(circuit frontend.Circuit, assignment frontend.Circuit, curve ecc.ID, checkSerialization bool) _witness {
+func (assert *Assert) parseAssignment(circuit frontend.Circuit, assignment frontend.Circuit, field *big.Int, testname string, checkSerialization bool) _witness {
 	if assignment == nil {
 		return _witness{}
 	}
-	full, err := frontend.NewWitness(assignment, curve.ScalarField())
+	full, err := frontend.NewWitness(assignment, field)
 	assert.NoError(err, "can't parse assignment into full witness")
 
-	public, err := frontend.NewWitness(assignment, curve.ScalarField(), frontend.PublicOnly())
+	public, err := frontend.NewWitness(assignment, field, frontend.PublicOnly())
 	assert.NoError(err, "can't parse assignment into public witness")
 
 	if checkSerialization {
 		witnessBuilder := func() any {
-			w, err := witness.New(curve.ScalarField())
+			w, err := witness.New(field)
 			if err != nil {
 				panic(err)
 			}
@@ -217,18 +264,18 @@ func (assert *Assert) parseAssignment(circuit frontend.Circuit, assignment front
 
 		// count number of element in witness.
 		// if too many, we don't do JSON serialization.
-		s, err := schema.Walk(curve.ScalarField(), assignment, tVariable, nil)
+		s, err := schema.Walk(field, assignment, tVariable, nil)
 		assert.NoError(err)
 
 		if s.Public+s.Secret <= serializationThreshold {
 			assert.Run(func(assert *Assert) {
-				s := lazySchema(curve.ScalarField(), circuit)()
-				assert.marshalWitnessJSON(full, s, curve, false)
-			}, curve.String(), "marshal/json")
+				s := lazySchema(field, circuit)()
+				assert.marshalWitnessJSON(full, s, field, false)
+			}, testname, "marshal/json")
 			assert.Run(func(assert *Assert) {
-				s := lazySchema(curve.ScalarField(), circuit)()
-				assert.marshalWitnessJSON(public, s, curve, true)
-			}, curve.String(), "marshal-public/json")
+				s := lazySchema(field, circuit)()
+				assert.marshalWitnessJSON(public, s, field, true)
+			}, testname, "marshal-public/json")
 		}
 	}
 
