@@ -26,10 +26,7 @@ func GetHints() []solver.Hint {
 		decomposeScalarG1,
 		g1SqrtRatioHint,
 		g2SqrtRatioHint,
-		g1MarshalMaskHint,
-		g1UnmarshalHint,
-		g2MarshalMaskHint,
-		g2UnmarshalHint,
+		unmarshalG1,
 	}
 }
 
@@ -334,34 +331,63 @@ func decomposeScalarG1(mod *big.Int, inputs []*big.Int, outputs []*big.Int) erro
 // The main idea is that since the computation of the square root involves taking large powers of u/v, the inversion of v can be avoided.
 //
 // nativeInputs[0] = u, nativeInputs[1]=v
-// nativeOutput[1] = 1 if u/v is a QR, 0 otherwise, nativeOutput[1]=sqrt(u/v) or sqrt(Z u/v)
+// nativeOutput[0] = 0 if u/v is a QR, 1 otherwise, emulatedOutput[0]=sqrt(u/v) or sqrt(Z u/v)
 func g1SqrtRatioHint(nativeMod *big.Int, nativeInputs, nativeOutputs []*big.Int) error {
-	return emulated.UnwrapHint(nativeInputs, nativeOutputs,
-		func(mod *big.Int, inputs, outputs []*big.Int) error {
-			var u, v, z fp.Element
-			u.SetBigInt(inputs[0])
-			v.SetBigInt(inputs[1])
+	return emulated.UnwrapHintContext(nativeMod, nativeInputs, nativeOutputs, func(hc emulated.HintContext) error {
+		m := hc.EmulatedModuli()
+		if len(m) != 1 {
+			return fmt.Errorf("expecting one modulus, got %d", len(m))
+		}
+		inputs, outputsEm := hc.InputsOutputs(m[0])
+		if len(inputs) != 2 {
+			return fmt.Errorf("expecting 2 inputs, got %d", len(inputs))
+		}
+		if len(outputsEm) != 1 {
+			return fmt.Errorf("expecting 1 output, got %d", len(outputsEm))
+		}
+		_, outputsN := hc.NativeInputsOutputs()
+		if len(outputsN) != 1 {
+			return fmt.Errorf("expecting 1 native output, got %d", len(outputsN))
+		}
+		var u, v, z fp.Element
+		u.SetBigInt(inputs[0])
+		v.SetBigInt(inputs[1])
 
-			isQNr := hash_to_curve.G1SqrtRatio(&z, &u, &v)
-			if isQNr != 0 {
-				isQNr = 1
-			}
-			z.BigInt(outputs[0])
-			outputs[1].SetInt64(int64(isQNr))
-			return nil
-		})
+		isQNr := hash_to_curve.G1SqrtRatio(&z, &u, &v)
+		if isQNr != 0 {
+			isQNr = 1
+		}
+		z.BigInt(outputsEm[0])
+		outputsN[0].SetInt64(int64(isQNr))
+		return nil
+	})
 }
 
-func g2SqrtRatioHint(_ *big.Int, inputs []*big.Int, outputs []*big.Int) error {
-	return emulated.UnwrapHint(inputs, outputs, func(field *big.Int, inputs, outputs []*big.Int) error {
+// g2SqrtRatioHint computes the square root of u/v for E2 field elements and returns 0 iff u/v was indeed a quadratic residue
+// if not, we get sqrt(Z * u / v). Recall that Z is non-residue
+// If v = 0, u/v is meaningless and the output is unspecified, without raising an error.
+//
+// nativeInputs: u.A0, u.A1, v.A0, v.A1 (where u and v are E2 elements)
+// nativeOutput[0] = 0 if u/v is a QR, 1 otherwise
+// emulatedOutput[0], emulatedOutput[1] = sqrt(u/v) or sqrt(Z*u/v) as an E2 element
+func g2SqrtRatioHint(nativeMod *big.Int, nativeInputs []*big.Int, nativeOutputs []*big.Int) error {
+	return emulated.UnwrapHintContext(nativeMod, nativeInputs, nativeOutputs, func(hc emulated.HintContext) error {
+		m := hc.EmulatedModuli()
+		if len(m) != 1 {
+			return fmt.Errorf("expecting one modulus, got %d", len(m))
+		}
+		inputs, outputsEm := hc.InputsOutputs(m[0])
 		if len(inputs) != 4 {
-			return fmt.Errorf("expecting 4 inputs")
+			return fmt.Errorf("expecting 4 inputs, got %d", len(inputs))
 		}
-		if len(outputs) != 3 {
-			return fmt.Errorf("expecting 3 outputs")
+		if len(outputsEm) != 2 {
+			return fmt.Errorf("expecting 2 outputs, got %d", len(outputsEm))
 		}
-
-		var z, u, v bls12381.E2
+		_, outputsN := hc.NativeInputsOutputs()
+		if len(outputsN) != 1 {
+			return fmt.Errorf("expecting 1 native output, got %d", len(outputsN))
+		}
+		var u, v, z bls12381.E2
 		u.A0.SetBigInt(inputs[0])
 		u.A1.SetBigInt(inputs[1])
 		v.A0.SetBigInt(inputs[2])
@@ -371,132 +397,56 @@ func g2SqrtRatioHint(_ *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 		if isQNr != 0 {
 			isQNr = 1
 		}
-
-		outputs[0].SetUint64(isQNr)
-		z.A0.BigInt(outputs[1])
-		z.A1.BigInt(outputs[2])
+		z.A0.BigInt(outputsEm[0])
+		z.A1.BigInt(outputsEm[1])
+		outputsN[0].SetInt64(int64(isQNr))
 		return nil
 	})
 }
 
-func g1MarshalMaskHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
-	nbBytes := 2 * fp.Bytes
-	rawBytes := make([]byte, nbBytes)
-	if len(inputs) != nbBytes {
-		return ErrInvalidSizeEncodedX
-	}
-	for i := 0; i < nbBytes; i++ {
-		tmp := inputs[i].Bytes()
-		if len(tmp) == 0 {
-			rawBytes[i] = 0
-		} else {
-			rawBytes[i] = tmp[0]
+// unmarshalG1 unmarshals the y coordinate of a compressed BLS12-381 G1 point.
+// It takes as input the bytes of the compressed point and returns the y
+// coordinate. It uses non-native methods for outputting non-native value.
+func unmarshalG1(mod *big.Int, nativeInputs []*big.Int, outputs []*big.Int) error {
+	return emulated.UnwrapHintWithNativeInput(nativeInputs, outputs, func(emulatedMod *big.Int, nativeInputs, outputs []*big.Int) error {
+		nbBytes := fp.Bytes
+		xCoord := make([]byte, nbBytes)
+		if len(nativeInputs) != nbBytes {
+			return fmt.Errorf("expecting %d inputs, got %d", nbBytes, len(nativeInputs))
 		}
-	}
-
-	var point bls12381.G1Affine
-	_, err := point.SetBytes(rawBytes)
-	if err != nil {
-		return err
-	}
-
-	compressedBytes := point.Bytes()
-	for i := 0; i < 4; i++ {
-		outputs[i].SetBytes([]byte{compressedBytes[i]})
-	}
-
-	return nil
-}
-
-func g1UnmarshalHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
-	nbBytes := fp.Bytes
-	xCoord := make([]byte, nbBytes)
-	if len(inputs) != nbBytes {
-		return ErrInvalidSizeEncodedX
-	}
-	for i := 0; i < nbBytes; i++ {
-		tmp := inputs[i].Bytes()
-		if len(tmp) == 0 {
-			xCoord[i] = 0
-		} else {
-			xCoord[i] = tmp[len(tmp)-1] // tmp is in big endian
+		for i := range nbBytes {
+			if !nativeInputs[i].IsUint64() || ((nativeInputs[i].Uint64() &^ 0xff) > 0) {
+				return fmt.Errorf("input %d is not a byte: %s", i, nativeInputs[i].String())
+			}
+			xCoord[i] = byte(nativeInputs[i].Uint64())
 		}
-	}
 
-	var point bls12381.G1Affine
-	_, err := point.SetBytes(xCoord)
-	if err != nil {
-		return err
-	}
-
-	// /!\ this step is needed because currently we can't mix
-	// native and emulated elements in a hint
-	yMarshalled := point.Y.Marshal()
-	for i := 0; i < len(yMarshalled); i++ {
-		outputs[i].SetBytes([]byte{yMarshalled[i]})
-	}
-
-	return nil
-}
-
-func g2MarshalMaskHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
-	nbBytes := 4 * fp.Bytes
-	rawBytes := make([]byte, nbBytes)
-	if len(inputs) != nbBytes {
-		return ErrInvalidSizeEncodedX
-	}
-	for i := 0; i < nbBytes; i++ {
-		tmp := inputs[i].Bytes()
-		if len(tmp) == 0 {
-			rawBytes[i] = 0
-		} else {
-			rawBytes[i] = tmp[0]
+		var point bls12381.G1Affine
+		_, err := point.SetBytes(xCoord)
+		// we have an error. However, as we have already checked the mask to be
+		// valid (0b100, 0b101, 0b110), and additionally checked that if mask is
+		// for infinity then also X is infinity, then in practice we can have
+		// only errors if x does not allow to encode valid point on a curve. In
+		// this case, we return a random point not on curve ourselves and then
+		// it is later checked in circuit indeed not to be on a curve.
+		if err != nil {
+			var sign int64
+			switch (xCoord[0] & mMask) >> 5 {
+			case 0b100:
+				sign = 1
+			case 0b101:
+				sign = -1
+			default:
+				return fmt.Errorf("invalid mask %b for unmarshalG1: %w", (xCoord[0]&mMask)>>5, err)
+			}
+			for i := 1; i < 100; i++ { // we have probability 1/2 for each i to find a point not on curve
+				point.Y.SetInt64(int64(i) * sign)
+				if !point.IsOnCurve() {
+					break
+				}
+			}
 		}
-	}
-
-	var point bls12381.G2Affine
-	_, err := point.SetBytes(rawBytes)
-	if err != nil {
-		return err
-	}
-
-	compressedBytes := point.Bytes()
-	for i := 0; i < 4; i++ {
-		outputs[i].SetBytes([]byte{compressedBytes[i]})
-	}
-
-	return nil
-}
-
-func g2UnmarshalHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
-	nbBytes := 2 * fp.Bytes
-	xCoord := make([]byte, nbBytes)
-	if len(inputs) != nbBytes {
-		return ErrInvalidSizeEncodedX
-	}
-	for i := 0; i < nbBytes; i++ {
-		tmp := inputs[i].Bytes()
-		if len(tmp) == 0 {
-			xCoord[i] = 0
-		} else {
-			xCoord[i] = tmp[len(tmp)-1] // tmp is in big endian
-		}
-	}
-
-	var point bls12381.G2Affine
-	_, err := point.SetBytes(xCoord)
-	if err != nil {
-		return err
-	}
-
-	// /!\ this step is needed because currently we can't mix
-	// native and emulated elements in a hint
-	yMarshalled := make([]byte, 2*fp.Bytes)
-	copy(yMarshalled[0:fp.Bytes], point.Y.A1.Marshal())
-	copy(yMarshalled[fp.Bytes:2*fp.Bytes], point.Y.A0.Marshal())
-	for i := 0; i < len(yMarshalled); i++ {
-		outputs[i].SetBytes([]byte{yMarshalled[i]})
-	}
-
-	return nil
+		point.Y.BigInt(outputs[0])
+		return nil
+	})
 }
